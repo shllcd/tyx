@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "xtask", "bench"]
 resolver = "3"
 
 [workspace.package]
@@ -12,8 +12,8 @@ repository = "https://github.com/shllcd/tyx"
 [workspace.dependencies]
 inventory = "0.3"
 tyx = { path = "crates/tyx" }
-tyx-derive = { path = "crates/tyx-derive" }
-tyx-ir = { path = "crates/tyx-ir" }
+tyx-derive = { path = "crates/tyx_derive" }
+tyx-ir = { path = "crates/tyx_ir" }
 proc-macro2 = "1"
 quote = "1"
 serde = { version = "1", features = ["derive"] }
@@ -24,3 +24,8 @@ uuid = "1"
 
 [profile.dev]
 debug = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = 1

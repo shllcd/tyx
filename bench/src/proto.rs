@@ -251,7 +251,12 @@ impl PostV2 {
             state: v.state as i32,
             created: to_millis(v.created),
             changed: to_millis(v.changed),
-            cover: v.cover.as_ref().map(|i| ImageV2 { key: i.key.clone(), width: i.width.into(), height: i.height.into(), alt: i.alt.clone() }),
+            cover: v.cover.as_ref().map(|i| ImageV2 {
+                key: i.key.clone(),
+                width: i.width.into(),
+                height: i.height.into(),
+                alt: i.alt.clone(),
+            }),
             tags: v.tags.clone(),
             summary: v.summary.clone(),
         }

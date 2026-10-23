@@ -3,8 +3,30 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 const WORDS: &[&str] = &[
-    "rust", "embedded", "database", "schema", "index", "query", "async", "writer", "snapshot", "replica", "frame", "varint",
-    "migration", "bucket", "queue", "kyoto", "garden", "lantern", "harbor", "copper", "meadow", "signal", "orbit", "paper",
+    "rust",
+    "embedded",
+    "database",
+    "schema",
+    "index",
+    "query",
+    "async",
+    "writer",
+    "snapshot",
+    "replica",
+    "frame",
+    "varint",
+    "migration",
+    "bucket",
+    "queue",
+    "kyoto",
+    "garden",
+    "lantern",
+    "harbor",
+    "copper",
+    "meadow",
+    "signal",
+    "orbit",
+    "paper",
 ];
 
 pub struct Lcg(u64);

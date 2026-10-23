@@ -148,7 +148,11 @@ impl Flat for model::Document {
             changed_at: d.changed_at().map(from_millis),
             etags: d
                 .etags()
-                .map(|v| v.iter().map(|e| model::Etag { value: e.value().expect("value").to_owned(), seen_at: from_millis(e.seen_at()) }).collect())
+                .map(|v| {
+                    v.iter()
+                        .map(|e| model::Etag { value: e.value().expect("value").to_owned(), seen_at: from_millis(e.seen_at()) })
+                        .collect()
+                })
                 .unwrap_or_default(),
         }
     }

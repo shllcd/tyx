@@ -60,7 +60,13 @@ impl Bit for model::User {
     type Native = User;
 
     fn to_bit(&self) -> User {
-        User { id: self.id, email: self.email.clone(), role: self.role, created: to_millis(self.created), last_seen: self.last_seen.map(to_millis) }
+        User {
+            id: self.id,
+            email: self.email.clone(),
+            role: self.role,
+            created: to_millis(self.created),
+            last_seen: self.last_seen.map(to_millis),
+        }
     }
 
     fn from_bit(n: User) -> Self {

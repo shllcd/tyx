@@ -4,8 +4,8 @@ use crate::formats::{self, Dataset, Visit};
 use crate::meter::{self, Op, op};
 use crate::model::{ArchivedPost, ArchivedPostState, Blob, Post, PostRef, PostState, PostV2, to_millis};
 use crate::proto::{self, Proto};
-use tyx::{Encode, Writer};
 use std::hint::black_box;
+use tyx::{Encode, Writer};
 
 fn ns(x: f64) -> String {
     if x < 100.0 { format!("{x:.1}") } else { format!("{x:.0}") }
@@ -279,7 +279,9 @@ pub fn post_access(post: &Post) {
     assert_eq!(flat::touch(fb_checked(&fbuf)), expect_touch);
 
     println!("\n## Post: borrowed / zero-copy access\n");
-    println!("Full view = obtain the borrowed/zero-copy view and read every field. Index filter = read `state` and `changed` only (what a `by_feed (state, changed)` index maintenance or filter needs). Formats not listed need a full owned decode (see the Post table).\n");
+    println!(
+        "Full view = obtain the borrowed/zero-copy view and read every field. Index filter = read `state` and `changed` only (what a `by_feed (state, changed)` index maintenance or filter needs). Formats not listed need a full owned decode (see the Post table).\n"
+    );
     println!("| format / access path | full view ns | full view allocs (n / B) | index filter ns | index filter allocs (n / B) |");
     println!("|---|--:|--:|--:|--:|");
     for (name, view, field) in &cases {
@@ -376,8 +378,12 @@ pub fn batch(posts: &Vec<Post>) {
     let tyx_presized = presized(tyx_rows, |w| posts.encode(w));
 
     println!("\n## Batch: `Vec<Post>` × {} (varied lengths, ~50% `cover`, 0–8 tags)\n", posts.len());
-    println!("`whole` = the Vec encoded as one message; `Σ rows` = each Post encoded alone (what a row store keeps); zstd level 3. Peak heap = max live heap above the baseline while decoding the whole batch (includes the result).\n");
-    println!("| format | whole B | whole zstd B | Σ rows B | Σ rows, concatenated, zstd B | encode ms | decode ms | decode allocs (n / B) | peak heap during decode B | borrowed decode ms |");
+    println!(
+        "`whole` = the Vec encoded as one message; `Σ rows` = each Post encoded alone (what a row store keeps); zstd level 3. Peak heap = max live heap above the baseline while decoding the whole batch (includes the result).\n"
+    );
+    println!(
+        "| format | whole B | whole zstd B | Σ rows B | Σ rows, concatenated, zstd B | encode ms | decode ms | decode allocs (n / B) | peak heap during decode B | borrowed decode ms |"
+    );
     println!("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|");
     for (l, (sum, sum_zstd)) in bench.lines.iter().zip(&sizes.sums) {
         println!(
@@ -405,7 +411,9 @@ fn header_width(bytes: &[u8]) -> usize {
 
 pub fn widening(post: &Post) {
     println!("\n## tyx frame-header widening\n");
-    println!("`Writer::begin` reserves 1 header byte; `Writer::end` splices the header wider (memmove of the frame body) once the body exceeds 63 B. `ideal` writes byte-identical output with the length known up front (no splice). Pre-sized = appended into a large pre-allocated `Writer`, so no allocation is measured; `to_vec` is the public one-shot API.\n");
+    println!(
+        "`Writer::begin` reserves 1 header byte; `Writer::end` splices the header wider (memmove of the frame body) once the body exceeds 63 B. `ideal` writes byte-identical output with the length known up front (no splice). Pre-sized = appended into a large pre-allocated `Writer`, so no allocation is measured; `to_vec` is the public one-shot API.\n"
+    );
     println!("| value | body B | header B | `to_vec` ns | pre-sized ns | ideal pre-sized ns | splice overhead ns |");
     println!("|---|--:|--:|--:|--:|--:|--:|");
     for len in [40, 56, 60, 62, 63, 64, 70, 126, 127, 200, 330, 1000, 4000, 8189, 8190, 16000] {
@@ -432,7 +440,9 @@ pub fn widening(post: &Post) {
         );
     }
     let small = |title_len: usize| Post { slug: "a".into(), title: "t".repeat(title_len), cover: None, tags: Vec::new(), ..post.clone() };
-    for (label, p) in [("Post, body < 64 B", small(12)), ("Post, body ≥ 64 B (+8 B title)", small(20)), ("Post (dataset row)", post.clone())] {
+    for (label, p) in
+        [("Post, body < 64 B", small(12)), ("Post, body ≥ 64 B (+8 B title)", small(20)), ("Post (dataset row)", post.clone())]
+    {
         let bytes = tyx::to_vec(&p);
         let to_vec = op(|| tyx::to_vec(black_box(&p)));
         let pre = presized(bytes.len(), |w| p.encode(w));
@@ -464,7 +474,14 @@ pub fn evolution(post: &Post) {
             let bytes = prost::Message::encode_to_vec(&proto::PostV2::from_model(&v2));
             probe(bytes, |b| <proto::Post as prost::Message>::decode(b).map(Post::from_proto), v1_post)
         }),
-        ("bincode 2 (serde)", probe(bincode::serde::encode_to_vec(&v2, bc).expect("bincode"), |b| bincode::serde::decode_from_slice::<Post, _>(b, bc).map(|r| r.0), v1_post)),
+        (
+            "bincode 2 (serde)",
+            probe(
+                bincode::serde::encode_to_vec(&v2, bc).expect("bincode"),
+                |b| bincode::serde::decode_from_slice::<Post, _>(b, bc).map(|r| r.0),
+                v1_post,
+            ),
+        ),
         ("postcard", probe(postcard::to_allocvec(&v2).expect("postcard"), |b| postcard::from_bytes::<Post>(b), v1_post)),
         ("bitcode (serde)", probe(bitcode::serialize(&v2).expect("bitcode"), |b| bitcode::deserialize::<Post>(b), v1_post)),
         ("pot", probe(pot::to_vec(&v2).expect("pot"), |b| pot::from_slice::<Post>(b), v1_post)),
@@ -478,7 +495,11 @@ pub fn evolution(post: &Post) {
         ("json (serde_json)", probe(serde_json::to_vec(&v2).expect("json"), |b| serde_json::from_slice::<Post>(b), v1_post)),
     ];
     let qualitative = [
-        ("tyx", "yes with a `#[tyx(unknown)]` field: it keeps the unknown mask bits and frame tail and writes them back; without one the decoder skips them", "0 B when absent; one mask varint per struct (1 B for ≤7 optional fields), omitted when no optional field is set"),
+        (
+            "tyx",
+            "yes with a `#[tyx(unknown)]` field: it keeps the unknown mask bits and frame tail and writes them back; without one the decoder skips them",
+            "0 B when absent; one mask varint per struct (1 B for ≤7 optional fields), omitted when no optional field is set",
+        ),
         ("protobuf (prost)", "no: prost drops unknown fields", "0 B when absent"),
         ("bincode 2 (serde)", "n/a (positional, unframed)", "1 B tag"),
         ("postcard", "n/a (positional, unframed)", "1 B tag"),
@@ -490,14 +511,24 @@ pub fn evolution(post: &Post) {
         ("json (serde_json)", "no (serde)", "`null` + key"),
     ];
     println!("\n## Schema evolution\n");
-    println!("Probe: a newer writer appends `summary: Option<String>` to `Post` and `alt: Option<String>` to the nested `Image` (both set); the old `Post` type decodes it.\n");
-    println!("| format | old reader skips appended fields (probed) | preserves unknown fields on re-encode | cost of an absent optional field |");
+    println!(
+        "Probe: a newer writer appends `summary: Option<String>` to `Post` and `alt: Option<String>` to the nested `Image` (both set); the old `Post` type decodes it.\n"
+    );
+    println!(
+        "| format | old reader skips appended fields (probed) | preserves unknown fields on re-encode | cost of an absent optional field |"
+    );
     println!("|---|---|---|---|");
     for ((name, result), (qname, preserve, cost)) in probes.iter().zip(qualitative) {
         assert_eq!(*name, qname);
         println!("| {name} | {result} | {preserve} | {cost} |");
     }
-    println!("| rkyv | not probed: no (fixed archived layout; a changed type fails validation or is misread) | no | inline `Option` tag + full `T` slot (absent costs the same as present) |");
-    println!("| flatbuffers | not probed: yes by design (tables, vtables) | no via generated API (bytes can be passed through) | 0 B data; a vtable slot (2 B) only if a later field is set |");
-    println!("| capnp | not probed: yes by design | yes: copying a struct reader into a builder keeps unknown fields | scalar slot always reserved in the data section; here `union` adds a 2 B discriminant; absent pointer = 8 B null |");
+    println!(
+        "| rkyv | not probed: no (fixed archived layout; a changed type fails validation or is misread) | no | inline `Option` tag + full `T` slot (absent costs the same as present) |"
+    );
+    println!(
+        "| flatbuffers | not probed: yes by design (tables, vtables) | no via generated API (bytes can be passed through) | 0 B data; a vtable slot (2 B) only if a later field is set |"
+    );
+    println!(
+        "| capnp | not probed: yes by design | yes: copying a struct reader into a builder keeps unknown fields | scalar slot always reserved in the data section; here `union` adds a 2 B discriminant; absent pointer = 8 B null |"
+    );
 }

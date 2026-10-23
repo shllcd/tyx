@@ -236,7 +236,12 @@ impl PostV2 {
             state: post.state,
             created: post.created,
             changed: post.changed,
-            cover: post.cover.as_ref().map(|c| ImageV2 { key: c.key.clone(), width: c.width, height: c.height, alt: Some("alt text".into()) }),
+            cover: post.cover.as_ref().map(|c| ImageV2 {
+                key: c.key.clone(),
+                width: c.width,
+                height: c.height,
+                alt: Some("alt text".into()),
+            }),
             tags: post.tags.clone(),
             summary: Some("a summary appended by a newer schema".into()),
         }

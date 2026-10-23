@@ -24,8 +24,7 @@ fn main() {
     let post = data::post(&mut rng);
     let post_none = model::Post { cover: None, ..post.clone() };
     let document = data::document(&mut rng);
-    let document_none =
-        model::Document { parent: None, seq: None, fetched_at: None, changed_at: None, ..document.clone() };
+    let document_none = model::Document { parent: None, seq: None, fetched_at: None, changed_at: None, ..document.clone() };
     let batch = data::batch(&mut rng, 10_000);
 
     println!("# Serialization benchmark: tyx vs. other formats\n");

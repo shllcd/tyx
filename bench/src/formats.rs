@@ -7,7 +7,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
-pub trait Dataset: Clone + PartialEq + Debug + Serialize + DeserializeOwned + tyx::Encode + for<'de> tyx::Decode<'de> + Proto + Flat + Capn + Bit {
+pub trait Dataset:
+    Clone + PartialEq + Debug + Serialize + DeserializeOwned + tyx::Encode + for<'de> tyx::Decode<'de> + Proto + Flat + Capn + Bit
+{
     type Ref<'a>: tyx::Encode + tyx::Decode<'a> + Serialize + Deserialize<'a>;
     fn rkyv_encode(&self, buf: Vec<u8>) -> Vec<u8>;
     fn rkyv_decode(bytes: &[u8]) -> Self;
@@ -72,7 +74,11 @@ pub fn for_each<T: Dataset>(v: &mut impl Visit<T>) {
         |b| bincode::serde::decode_from_slice(b, bincode_config()).expect("bincode").0,
     );
     v.borrowed(
-        |b| drop(std::hint::black_box(bincode::serde::borrow_decode_from_slice::<T::Ref<'_>, _>(b, bincode_config()).expect("bincode borrowed"))),
+        |b| {
+            drop(std::hint::black_box(
+                bincode::serde::borrow_decode_from_slice::<T::Ref<'_>, _>(b, bincode_config()).expect("bincode borrowed"),
+            ))
+        },
         |b| {
             let r = bincode::serde::borrow_decode_from_slice::<T::Ref<'_>, _>(b, bincode_config()).expect("bincode borrowed").0;
             bincode::serde::encode_to_vec(&r, bincode_config()).expect("bincode")
@@ -154,5 +160,9 @@ pub fn for_each<T: Dataset>(v: &mut impl Visit<T>) {
         |b| rmp_serde::from_slice(b).expect("rmp"),
     );
     v.format("cbor (ciborium)", |x, buf| ciborium::into_writer(x, &mut *buf).expect("cbor"), |b| ciborium::from_reader(b).expect("cbor"));
-    v.format("json (serde_json)", |x, buf| serde_json::to_writer(&mut *buf, x).expect("json"), |b| serde_json::from_slice(b).expect("json"));
+    v.format(
+        "json (serde_json)",
+        |x, buf| serde_json::to_writer(&mut *buf, x).expect("json"),
+        |b| serde_json::from_slice(b).expect("json"),
+    );
 }

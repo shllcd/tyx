@@ -3,7 +3,7 @@
 Command:
 
 ```sh
-cd tyx/bench && cargo run --release
+cargo xtask bench
 ```
 
 Machine: Apple M3, macOS 26.6.2. Toolchain: rustc 1.98.1 (release profile: `lto = "fat"`, `codegen-units = 1`). External tools: flatc 25.12.19, capnp 1.2.0.
