@@ -1,0 +1,18 @@
+[package]
+name = "tyx-derive"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Derive macro for tyx: binary codecs and IR export"
+license.workspace = true
+repository.workspace = true
+keywords = ["serialization", "codec", "derive", "proc-macro"]
+
+[lib]
+name = "tyx_derive"
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true

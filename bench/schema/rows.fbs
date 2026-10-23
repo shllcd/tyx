@@ -1,0 +1,59 @@
+namespace fb;
+
+enum Role : ubyte { Reader, Author, Admin }
+enum PostState : ubyte { Draft, Published, Hidden }
+enum Source : ubyte { Web, Rss, Sitemap, Api }
+enum DocumentKind : ubyte { Page, Feed, Image, Pdf }
+enum DocumentState : ubyte { Pending, Fetched, Failed, Gone }
+
+struct Uuid {
+  bytes: [ubyte:16];
+}
+
+table User {
+  id: Uuid;
+  email: string;
+  role: Role;
+  created: long;
+  last_seen: long = null;
+}
+
+table Image {
+  key: string;
+  width: ushort;
+  height: ushort;
+}
+
+table Post {
+  id: Uuid;
+  author: Uuid;
+  slug: string;
+  title: string;
+  state: PostState;
+  created: long;
+  changed: long;
+  cover: Image;
+  tags: [string];
+}
+
+table Etag {
+  value: string;
+  seen_at: long;
+}
+
+table Document {
+  id: Uuid;
+  source: Source;
+  kind: DocumentKind;
+  key: string;
+  parent: Uuid;
+  seq: ulong = null;
+  state: DocumentState;
+  fetched_at: long = null;
+  changed_at: long = null;
+  etags: [Etag];
+}
+
+table Posts {
+  items: [Post];
+}

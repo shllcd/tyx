@@ -1,0 +1,31 @@
+[package]
+name = "tyx"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Rust types are the schema: derive a compact binary codec and a language-neutral IR"
+license.workspace = true
+repository.workspace = true
+keywords = ["serialization", "codec", "encoding", "schema", "derive"]
+
+[lib]
+name = "tyx"
+
+[features]
+default = ["export"]
+export = ["dep:inventory"]
+json = ["dep:serde_json", "time", "time/formatting", "time/parsing"]
+time = ["dep:time"]
+uuid = ["dep:uuid"]
+
+[dependencies]
+inventory = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+tyx-derive.workspace = true
+tyx-ir.workspace = true
+uuid = { workspace = true, optional = true }
+
+[dev-dependencies]
+time = { workspace = true, features = ["macros"] }
+uuid.workspace = true
