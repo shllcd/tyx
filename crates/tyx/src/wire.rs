@@ -145,8 +145,10 @@ impl Writer {
             width += 1;
         }
         encoded[width] = header as u8;
-        self.buf[start] = encoded[0];
-        self.buf.splice(start + 1..start + 1, encoded[1..=width].iter().copied());
+        let body = start + 1..self.buf.len();
+        self.buf.resize(self.buf.len() + width, 0);
+        self.buf.copy_within(body, start + 1 + width);
+        self.buf[start..=start + width].copy_from_slice(&encoded[..=width]);
     }
 }
 
