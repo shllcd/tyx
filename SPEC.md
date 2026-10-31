@@ -31,6 +31,9 @@ A varint wider than its type is an error.
 | `array` (N)    | exactly N items, no count                                    |
 | `tuple`        | the items in order, no count                                 |
 
+A reader rejects a `seq`, `set` or `map` count larger than the bytes left in its input, so a sequence of items
+encoded in zero bytes (e.g. `unit`) cannot be longer than the bytes that follow its count.
+
 `option` above is the standalone form. Struct fields of type `Option<T>` use the presence mask instead.
 
 ## Frames
