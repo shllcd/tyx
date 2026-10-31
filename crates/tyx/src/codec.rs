@@ -394,7 +394,12 @@ impl<T: Encode, S> Encode for HashSet<T, S> {
 
 impl<'de, T: Decode<'de> + Eq + Hash, S: BuildHasher + Default> Decode<'de> for HashSet<T, S> {
     fn decode(r: &mut Reader<'de>) -> Result<Self, Error> {
-        decode_iter(r)
+        let count = r.count()?;
+        let mut set = Self::with_capacity_and_hasher(prealloc::<T>(count), S::default());
+        for _ in 0..count {
+            set.insert(T::decode(r)?);
+        }
+        Ok(set)
     }
 }
 
@@ -418,7 +423,12 @@ impl<K: Encode, V: Encode, S> Encode for HashMap<K, V, S> {
 
 impl<'de, K: Decode<'de> + Eq + Hash, V: Decode<'de>, S: BuildHasher + Default> Decode<'de> for HashMap<K, V, S> {
     fn decode(r: &mut Reader<'de>) -> Result<Self, Error> {
-        decode_pairs(r)
+        let count = r.count()?;
+        let mut map = Self::with_capacity_and_hasher(prealloc::<(K, V)>(count), S::default());
+        for _ in 0..count {
+            map.insert(K::decode(r)?, V::decode(r)?);
+        }
+        Ok(map)
     }
 }
 
