@@ -230,6 +230,13 @@ impl<'de: 'a, 'a> Decode<'de> for Cow<'a, str> {
     }
 }
 
+impl<'de: 'a, 'a> Decode<'de> for Cow<'a, [u8]> {
+    #[inline]
+    fn decode(r: &mut Reader<'de>) -> Result<Self, Error> {
+        <&[u8]>::decode(r).map(Cow::Borrowed)
+    }
+}
+
 impl Encode for String {
     #[inline]
     fn encode(&self, w: &mut Writer) {
