@@ -412,9 +412,9 @@ fn header_width(bytes: &[u8]) -> usize {
 pub fn widening(post: &Post) {
     println!("\n## tyx frame-header widening\n");
     println!(
-        "`Writer::begin` reserves 1 header byte; `Writer::end` splices the header wider (memmove of the frame body) once the body exceeds 63 B. `ideal` writes byte-identical output with the length known up front (no splice). Pre-sized = appended into a large pre-allocated `Writer`, so no allocation is measured; `to_vec` is the public one-shot API.\n"
+        "`Writer::begin` reserves 1 header byte; `Writer::end` widens the header once the body exceeds 63 B, shifting the frame body by the extra bytes. `ideal` writes byte-identical output with the length known up front (no shift). Pre-sized = appended into a large pre-allocated `Writer`, so no allocation is measured; `to_vec` is the public one-shot API.\n"
     );
-    println!("| value | body B | header B | `to_vec` ns | pre-sized ns | ideal pre-sized ns | splice overhead ns |");
+    println!("| value | body B | header B | `to_vec` ns | pre-sized ns | ideal pre-sized ns | widening overhead ns |");
     println!("|---|--:|--:|--:|--:|--:|--:|");
     for len in [40, 56, 60, 62, 63, 64, 70, 126, 127, 200, 330, 1000, 4000, 8189, 8190, 16000] {
         let blob = Blob { s: "x".repeat(len) };
