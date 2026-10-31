@@ -1,17 +1,4 @@
-mod bit;
-mod capn;
-mod data;
-mod flat;
-mod formats;
-mod meter;
-mod model;
-mod proto;
-mod report;
-
-#[allow(clippy::all, mismatched_lifetime_syntaxes, reason = "capnpc output")]
-pub mod rows_capnp {
-    include!(concat!(env!("OUT_DIR"), "/rows_capnp.rs"));
-}
+use tyx_bench::{data, meter, model, report};
 
 #[global_allocator]
 static ALLOC: meter::Counting = meter::Counting;
