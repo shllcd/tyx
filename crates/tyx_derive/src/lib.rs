@@ -486,7 +486,8 @@ fn decode_fields(path: &TokenStream, set: &FieldSet) -> TokenStream {
     let inits = set.fields.iter().map(|field| {
         let member = &field.member;
         let value = if field.attrs.unknown {
-            quote!(__tyx::Unknown::rest(r, mask, #known_optional)?)
+            let ty = &field.ty;
+            quote!(<#ty>::rest(r, mask, #known_optional)?)
         } else if field.attrs.skip {
             quote!(::std::default::Default::default())
         } else if let Some(bit) = set.optional_bits().find(|(_, optional)| optional.member == field.member).map(|(bit, _)| bit) {

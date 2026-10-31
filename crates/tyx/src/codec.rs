@@ -65,8 +65,23 @@ pub struct Unknown {
 impl Unknown {
     /// Takes the rest of a frame body whose first `known_optional` mask bits belong to known fields.
     pub fn rest(body: &mut Reader<'_>, mask: u64, known_optional: u32) -> Result<Self, Error> {
+        let rest = UnknownRef::rest(body, mask, known_optional)?;
+        Ok(Self { mask: rest.mask, bytes: rest.bytes.to_vec() })
+    }
+}
+
+/// [`Unknown`] borrowing its trailing bytes from the decoded input.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct UnknownRef<'a> {
+    pub mask: u64,
+    pub bytes: &'a [u8],
+}
+
+impl<'a> UnknownRef<'a> {
+    /// Takes the rest of a frame body whose first `known_optional` mask bits belong to known fields.
+    pub fn rest<'de: 'a>(body: &mut Reader<'de>, mask: u64, known_optional: u32) -> Result<Self, Error> {
         let mask = mask & u64::MAX.checked_shl(known_optional).unwrap_or(0);
-        Ok(Self { mask, bytes: body.take(body.remaining())?.to_vec() })
+        Ok(Self { mask, bytes: body.take(body.remaining())? })
     }
 }
 
