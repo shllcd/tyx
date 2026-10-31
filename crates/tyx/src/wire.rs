@@ -243,9 +243,10 @@ impl<'de> Reader<'de> {
         Ok(len)
     }
 
+    /// Reads an item count, failing with [`Error::Eof`] when it exceeds the remaining bytes.
     #[inline]
     pub fn count(&mut self) -> Result<usize, Error> {
-        usize::try_from(self.varint()?).map_err(|_| Error::VarintOverflow)
+        self.length()
     }
 
     #[inline]
