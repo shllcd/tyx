@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use crate::SeqRef;
 use tyx_ir::{Def, Error, Schema, Shape, Ty};
 
 pub trait Type {
@@ -178,6 +179,12 @@ impl<T: Type> Type for Vec<T> {
 }
 
 impl<T: Type> Type for [T] {
+    fn ty(reg: &mut Registry) -> Ty {
+        seq(T::ty(reg))
+    }
+}
+
+impl<T: Type> Type for SeqRef<'_, T> {
     fn ty(reg: &mut Registry) -> Ty {
         seq(T::ty(reg))
     }

@@ -1,7 +1,9 @@
 use crate::wire::{Error, Reader, Writer};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt;
 use std::hash::{BuildHasher, Hash};
+use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -348,6 +350,106 @@ macro_rules! shared_slice {
 }
 
 shared_slice!(Box, Rc, Arc);
+
+/// A `seq` left encoded in the input: decoding validates every item without allocating, and each iteration
+/// decodes the items again.
+pub struct SeqRef<'a, T> {
+    len: usize,
+    bytes: &'a [u8],
+    items: PhantomData<fn() -> T>,
+}
+
+impl<'a, T: Decode<'a>> SeqRef<'a, T> {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn iter(&self) -> SeqIter<'a, T> {
+        SeqIter { left: self.len, r: Reader::new(self.bytes), items: PhantomData }
+    }
+}
+
+impl<T> Clone for SeqRef<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for SeqRef<'_, T> {}
+
+impl<'a, T: Decode<'a> + fmt::Debug> fmt::Debug for SeqRef<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl<'a, T: Decode<'a>> IntoIterator for SeqRef<'a, T> {
+    type Item = T;
+    type IntoIter = SeqIter<'a, T>;
+
+    fn into_iter(self) -> SeqIter<'a, T> {
+        self.iter()
+    }
+}
+
+impl<'a, T: Decode<'a>> IntoIterator for &SeqRef<'a, T> {
+    type Item = T;
+    type IntoIter = SeqIter<'a, T>;
+
+    fn into_iter(self) -> SeqIter<'a, T> {
+        self.iter()
+    }
+}
+
+impl<T> Encode for SeqRef<'_, T> {
+    #[inline]
+    fn encode(&self, w: &mut Writer) {
+        w.varint(self.len as u64);
+        w.bytes(self.bytes);
+    }
+}
+
+impl<'de: 'a, 'a, T: Decode<'a>> Decode<'de> for SeqRef<'a, T> {
+    #[inline]
+    fn decode(r: &mut Reader<'de>) -> Result<Self, Error> {
+        let len = r.count()?;
+        let rest: &'a [u8] = r.clone().take(r.remaining())?;
+        let mut items = Reader::new(rest);
+        for _ in 0..len {
+            T::decode(&mut items)?;
+        }
+        let bytes = r.take(rest.len() - items.remaining())?;
+        Ok(Self { len, bytes, items: PhantomData })
+    }
+}
+
+pub struct SeqIter<'a, T> {
+    left: usize,
+    r: Reader<'a>,
+    items: PhantomData<fn() -> T>,
+}
+
+impl<'a, T: Decode<'a>> Iterator for SeqIter<'a, T> {
+    type Item = T;
+
+    #[inline]
+    fn next(&mut self) -> Option<T> {
+        self.left = self.left.checked_sub(1)?;
+        T::decode(&mut self.r).ok()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.left, Some(self.left))
+    }
+}
+
+impl<'a, T: Decode<'a>> ExactSizeIterator for SeqIter<'a, T> {}
 
 impl<T: Encode, const N: usize> Encode for [T; N] {
     #[inline]
