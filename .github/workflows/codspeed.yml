@@ -1,0 +1,43 @@
+name: CodSpeed
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: codspeed-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmarks:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install schema compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y capnproto
+          curl -sSfL -o "$RUNNER_TEMP/flatc.zip" https://github.com/google/flatbuffers/releases/download/v25.12.19/Linux.flatc.binary.g++-13.zip
+          unzip -q "$RUNNER_TEMP/flatc.zip" -d "$RUNNER_TEMP/flatc"
+          echo "$RUNNER_TEMP/flatc" >> "$GITHUB_PATH"
+
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        with:
+          tool: cargo-codspeed@6.0.0
+
+      - name: Build benchmarks
+        run: cargo codspeed build -p tyx-bench
+
+      - uses: CodSpeedHQ/action@61efe07e57e55bedeab750c434504de272a56e8c # v5.6.1
+        with:
+          mode: simulation
+          run: cargo codspeed run -p tyx-bench
