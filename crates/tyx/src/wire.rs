@@ -9,6 +9,13 @@ fn pack_varint_groups(groups: u64) -> u64 {
     (quads & 0x0fff_ffff_0000_0000) >> 4 | quads & 0x0000_0000_0fff_ffff
 }
 
+#[inline]
+fn spread_varint_groups(value: u64) -> u64 {
+    let quads = (value & 0x00ff_ffff_f000_0000) << 4 | value & 0x0000_0000_0fff_ffff;
+    let pairs = (quads & 0x0fff_c000_0fff_c000) << 2 | quads & 0x0000_3fff_0000_3fff;
+    (pairs & 0x3f80_3f80_3f80_3f80) << 1 | pairs & 0x007f_007f_007f_007f
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Eof,
@@ -90,7 +97,22 @@ impl Writer {
     }
 
     #[inline]
-    pub fn varint(&mut self, mut value: u64) {
+    pub fn varint(&mut self, value: u64) {
+        if value < 0x80 {
+            self.buf.push(value as u8);
+        } else if value < 1 << 56 {
+            let len = (64 - value.leading_zeros() as usize).div_ceil(7);
+            let continuations = 0x8080_8080_8080_8080 & ((1u64 << (8 * (len - 1))) - 1);
+            let start = self.buf.len();
+            self.buf.extend_from_slice(&(spread_varint_groups(value) | continuations).to_le_bytes());
+            self.buf.truncate(start + len);
+        } else {
+            self.varint_wide(value);
+        }
+    }
+
+    #[cold]
+    fn varint_wide(&mut self, mut value: u64) {
         while value >= 0x80 {
             self.buf.push(value as u8 | 0x80);
             value >>= 7;
