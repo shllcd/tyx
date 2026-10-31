@@ -32,6 +32,20 @@ pub trait Decode<'de>: Sized {
         }
         Ok(items)
     }
+
+    #[doc(hidden)]
+    #[inline]
+    fn decode_array<const N: usize>(r: &mut Reader<'de>) -> Result<[Self; N], Error> {
+        let mut error = None;
+        let items: [Option<Self>; N] = std::array::from_fn(|_| match error {
+            Some(_) => None,
+            None => Self::decode(r).map_err(|e| error = Some(e)).ok(),
+        });
+        match error {
+            Some(error) => Err(error),
+            None => Ok(items.map(|item| item.unwrap_or_else(|| unreachable!()))),
+        }
+    }
 }
 
 const MAX_PREALLOC_BYTES: usize = 64 * 1024;
@@ -107,6 +121,11 @@ impl Decode<'_> for u8 {
     #[inline]
     fn decode_vec(r: &mut Reader<'_>, count: usize) -> Result<Vec<Self>, Error> {
         r.take(count).map(<[u8]>::to_vec)
+    }
+
+    #[inline]
+    fn decode_array<const N: usize>(r: &mut Reader<'_>) -> Result<[Self; N], Error> {
+        r.array()
     }
 }
 
@@ -318,8 +337,7 @@ impl<T: Encode, const N: usize> Encode for [T; N] {
 impl<'de, T: Decode<'de>, const N: usize> Decode<'de> for [T; N] {
     #[inline]
     fn decode(r: &mut Reader<'de>) -> Result<Self, Error> {
-        let items = T::decode_vec(r, N)?;
-        Ok(items.try_into().unwrap_or_else(|_| unreachable!()))
+        T::decode_array(r)
     }
 }
 
