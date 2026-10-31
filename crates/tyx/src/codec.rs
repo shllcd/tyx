@@ -26,12 +26,18 @@ pub trait Decode<'de>: Sized {
     #[doc(hidden)]
     #[inline]
     fn decode_vec(r: &mut Reader<'de>, count: usize) -> Result<Vec<Self>, Error> {
-        let mut items = Vec::with_capacity(count.min(r.remaining()));
+        let mut items = Vec::with_capacity(prealloc::<Self>(count));
         for _ in 0..count {
             items.push(Self::decode(r)?);
         }
         Ok(items)
     }
+}
+
+const MAX_PREALLOC_BYTES: usize = 64 * 1024;
+
+fn prealloc<T>(count: usize) -> usize {
+    count.min(MAX_PREALLOC_BYTES / size_of::<T>().max(1))
 }
 
 /// The optional-field mask bits and trailing frame bytes of fields a newer schema appended, kept by a
