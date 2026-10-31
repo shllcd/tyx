@@ -26,7 +26,7 @@ pub trait Decode<'de>: Sized {
     #[doc(hidden)]
     #[inline]
     fn decode_vec(r: &mut Reader<'de>, count: usize) -> Result<Vec<Self>, Error> {
-        let mut items = Vec::with_capacity(prealloc::<Self>(count));
+        let mut items = Vec::with_capacity(prealloc::<Self>(count, r));
         for _ in 0..count {
             items.push(Self::decode(r)?);
         }
@@ -48,10 +48,10 @@ pub trait Decode<'de>: Sized {
     }
 }
 
-const MAX_PREALLOC_BYTES: usize = 64 * 1024;
+const PREALLOC_FLOOR_BYTES: usize = 64 * 1024;
 
-fn prealloc<T>(count: usize) -> usize {
-    count.min(MAX_PREALLOC_BYTES / size_of::<T>().max(1))
+fn prealloc<T>(count: usize, r: &Reader<'_>) -> usize {
+    count.min(PREALLOC_FLOOR_BYTES.max(r.remaining()) / size_of::<T>().max(1))
 }
 
 /// The optional-field mask bits and trailing frame bytes of fields a newer schema appended, kept by a
@@ -395,7 +395,7 @@ impl<T: Encode, S> Encode for HashSet<T, S> {
 impl<'de, T: Decode<'de> + Eq + Hash, S: BuildHasher + Default> Decode<'de> for HashSet<T, S> {
     fn decode(r: &mut Reader<'de>) -> Result<Self, Error> {
         let count = r.count()?;
-        let mut set = Self::with_capacity_and_hasher(prealloc::<T>(count), S::default());
+        let mut set = Self::with_capacity_and_hasher(prealloc::<T>(count, r), S::default());
         for _ in 0..count {
             set.insert(T::decode(r)?);
         }
@@ -424,7 +424,7 @@ impl<K: Encode, V: Encode, S> Encode for HashMap<K, V, S> {
 impl<'de, K: Decode<'de> + Eq + Hash, V: Decode<'de>, S: BuildHasher + Default> Decode<'de> for HashMap<K, V, S> {
     fn decode(r: &mut Reader<'de>) -> Result<Self, Error> {
         let count = r.count()?;
-        let mut map = Self::with_capacity_and_hasher(prealloc::<(K, V)>(count), S::default());
+        let mut map = Self::with_capacity_and_hasher(prealloc::<(K, V)>(count, r), S::default());
         for _ in 0..count {
             map.insert(K::decode(r)?, V::decode(r)?);
         }
