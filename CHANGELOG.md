@@ -9,6 +9,10 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 ## [Unreleased]
 
+### Added
+
+- `tyxrs`, a TypeScript runtime package that generates types from an IR schema and encodes and decodes values in Node and browsers.
+
 ## [0.0.0] - 2026-10-23
 
 ### Added
