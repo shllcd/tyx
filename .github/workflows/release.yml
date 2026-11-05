@@ -17,58 +17,44 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - name: Require default branch
-        if: github.ref_name != github.event.repository.default_branch
-        run: |
-          echo "::error::Releases run from ${{ github.event.repository.default_branch }} only"
-          exit 1
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - name: Bump version and changelog
-        id: version
-        env:
-          NOTES_FILE: ${{ runner.temp }}/notes.md
+      - id: version
+        uses: shllcd/actions/prepare-release@2646c40361e38224059283a1d1073a8d4b3d6cb9 # v1.1.0
+        with:
+          source: changelog
+          write-manifest: true
+          write-changelog: true
+          require-default-branch: true
+          version-files: 'packages/tyxrs/package.json:^  "version": "([^"]*)"'
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          pnpm-version: 12
+          package-manager-cache: false
+
+      - name: Build npm package
+        working-directory: packages/tyxrs
         run: |
-          version=$(node .github/scripts/release.mjs)
-          cargo metadata --format-version 1 > /dev/null
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          pnpm install --frozen-lockfile
+          pnpm run build
 
-      - id: auth
-        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - uses: shllcd/actions/publish-crates@2646c40361e38224059283a1d1073a8d4b3d6cb9 # v1.1.0
+        with:
+          version: ${{ steps.version.outputs.version }}
+          packages: tyx-derive, tyx-ir, tyx
 
-      - name: Publish crates
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          for crate in tyx-derive tyx-ir tyx; do
-            if curl -sf "https://crates.io/api/v1/crates/$crate/$VERSION" > /dev/null; then
-              echo "$crate $VERSION is already published"
-              continue
-            fi
-            for attempt in $(seq 10); do
-              if cargo publish -p "$crate"; then break; fi
-              if [ "$attempt" = 10 ]; then echo "publishing $crate failed" >&2; exit 1; fi
-              sleep 20
-            done
-          done
+      - uses: shllcd/actions/publish-npm@2646c40361e38224059283a1d1073a8d4b3d6cb9 # v1.1.0
+        with:
+          path: packages/tyxrs
+          version: ${{ steps.version.outputs.version }}
+          manager: npm
 
-      - name: Commit and tag
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock CHANGELOG.md
-          git commit -m "release: v$VERSION"
-          git tag "v$VERSION"
-          git push origin "HEAD:${{ github.event.repository.default_branch }}" --tags
-
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: gh release create "v$VERSION" --title "v$VERSION" --notes-file "${{ runner.temp }}/notes.md"
+      - uses: shllcd/actions/publish-release@2646c40361e38224059283a1d1073a8d4b3d6cb9 # v1.1.0
+        with:
+          tag: ${{ steps.version.outputs.tag }}
+          notes: ${{ steps.version.outputs.notes }}
+          files: ''
