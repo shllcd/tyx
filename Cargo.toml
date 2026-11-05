@@ -3,7 +3,7 @@ members = ["crates/*", "xtask", "bench"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 publish = true
 license = "MIT"
@@ -11,9 +11,9 @@ repository = "https://github.com/shllcd/tyx"
 
 [workspace.dependencies]
 inventory = "0.3"
-tyx = { path = "crates/tyx" }
-tyx-derive = { path = "crates/tyx_derive" }
-tyx-ir = { path = "crates/tyx_ir" }
+tyx = { path = "crates/tyx", version = "0.1.0" }
+tyx-derive = { path = "crates/tyx_derive", version = "0.1.0" }
+tyx-ir = { path = "crates/tyx_ir", version = "0.1.0" }
 proc-macro2 = "1"
 quote = "1"
 serde = { version = "1", features = ["derive"] }

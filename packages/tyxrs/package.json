@@ -1,6 +1,6 @@
 {
   "name": "tyxrs",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "TypeScript runtime for the tyx wire format: encode and decode values from a tyx IR schema",
   "license": "MIT",
   "repository": {
