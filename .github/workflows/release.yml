@@ -49,6 +49,7 @@ jobs:
         with:
           version: ${{ steps.version.outputs.version }}
           packages: tyx-derive, tyx-ir, tyx
+          args: --locked --allow-dirty
 
       - uses: shllcd/actions/publish-npm@2646c40361e38224059283a1d1073a8d4b3d6cb9 # v1.1.0
         with:
