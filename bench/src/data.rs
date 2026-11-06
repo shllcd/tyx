@@ -29,6 +29,9 @@ const WORDS: &[&str] = &[
     "paper",
 ];
 
+pub const SEED: u64 = 0x7a6e_a5ee_d00d;
+pub const BATCH_LEN: usize = 10_000;
+
 pub struct Lcg(u64);
 
 impl Lcg {

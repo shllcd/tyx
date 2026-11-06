@@ -8,7 +8,7 @@ fn main() {
 }
 
 fn rng() -> Lcg {
-    Lcg::new(0x7a6e_a5ee_d00d)
+    Lcg::new(data::SEED)
 }
 
 #[divan::bench(types = [User, Post, Document, Vec<Post>])]
@@ -57,6 +57,6 @@ impl Sample for Document {
 
 impl Sample for Vec<Post> {
     fn sample() -> Self {
-        data::batch(&mut rng(), 10_000)
+        data::batch(&mut rng(), data::BATCH_LEN)
     }
 }

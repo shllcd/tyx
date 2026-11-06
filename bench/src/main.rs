@@ -5,14 +5,14 @@ static ALLOC: meter::Counting = meter::Counting;
 
 fn main() {
     let started = std::time::Instant::now();
-    let mut rng = data::Lcg::new(0x7a6e_a5ee_d00d);
+    let mut rng = data::Lcg::new(data::SEED);
     let user = data::user(&mut rng);
     let user_none = model::User { last_seen: None, ..user.clone() };
     let post = data::post(&mut rng);
     let post_none = model::Post { cover: None, ..post.clone() };
     let document = data::document(&mut rng);
     let document_none = model::Document { parent: None, seq: None, fetched_at: None, changed_at: None, ..document.clone() };
-    let batch = data::batch(&mut rng, 10_000);
+    let batch = data::batch(&mut rng, data::BATCH_LEN);
 
     println!("# Serialization benchmark: tyx vs. other formats\n");
     report::rows("User", &user, &user_none, "last_seen = None");
