@@ -276,7 +276,9 @@ impl<'s> Cursor<'_, 's> {
                 }
                 slice.iter().map(|field| entries.get(&field.name)).collect()
             }
-            (Fields::Tuple(_), Value::Array(items)) if items.len() == slice.len() => items.iter().map(Some).collect(),
+            (Fields::Tuple(_), Value::Array(items)) if items.len() == slice.len() => {
+                items.iter().zip(slice).map(|(item, field)| (!(field.optional && item.is_null())).then_some(item)).collect()
+            }
             (Fields::Named(_), _) => return Err(self.fail("expected an object")),
             (Fields::Tuple(_), _) => return Err(self.fail(format_args!("expected an array of {}", slice.len()))),
         };

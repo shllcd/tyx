@@ -639,7 +639,7 @@ class Compiler {
         return values;
       }
       if (!Array.isArray(value) || value.length !== count) throw new TyxError(`expected an array of ${count}`);
-      return value;
+      return value.map((item, index) => (item === null && optional[index] ? undefined : item));
     };
 
     const maskOf = (values: readonly unknown[]): number | bigint => {
