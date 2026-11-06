@@ -126,6 +126,14 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 }
                 variants.push(VariantInfo { ident: variant.ident.clone(), kind, is_other, index, pinned: *pinned });
             }
+            for (position, variant) in variants.iter().enumerate() {
+                if variants[..position].iter().any(|earlier| earlier.index == variant.index) {
+                    return Err(syn::Error::new_spanned(
+                        &data.variants[position],
+                        format!("variant index {} is already used", variant.index),
+                    ));
+                }
+            }
             if variants.iter().filter(|variant| variant.is_other).count() > 1 {
                 return Err(syn::Error::new_spanned(&input.ident, "only one variant may be #[tyx(other)]"));
             }
