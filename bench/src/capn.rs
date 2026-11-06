@@ -5,14 +5,6 @@ use uuid::Uuid;
 
 pub const OPTIONS: ReaderOptions = ReaderOptions { traversal_limit_in_words: Some(1 << 30), nesting_limit: 64 };
 
-fn split(id: Uuid) -> (u64, u64) {
-    id.as_u64_pair()
-}
-
-fn join(hi: u64, lo: u64) -> Uuid {
-    Uuid::from_u64_pair(hi, lo)
-}
-
 pub trait Capn: Sized {
     fn capnp_build<A: message::Allocator>(&self, msg: &mut message::Builder<A>);
     fn capnp_read<S: ReaderSegments>(msg: &message::Reader<S>) -> capnp::Result<Self>;
@@ -21,7 +13,7 @@ pub trait Capn: Sized {
 impl Capn for model::User {
     fn capnp_build<A: message::Allocator>(&self, msg: &mut message::Builder<A>) {
         let mut u = msg.init_root::<user::Builder>();
-        let (hi, lo) = split(self.id);
+        let (hi, lo) = self.id.as_u64_pair();
         u.set_id_hi(hi);
         u.set_id_lo(lo);
         u.set_email(&self.email[..]);
@@ -36,7 +28,7 @@ impl Capn for model::User {
     fn capnp_read<S: ReaderSegments>(msg: &message::Reader<S>) -> capnp::Result<Self> {
         let u = msg.get_root::<user::Reader>()?;
         Ok(Self {
-            id: join(u.get_id_hi(), u.get_id_lo()),
+            id: Uuid::from_u64_pair(u.get_id_hi(), u.get_id_lo()),
             email: u.get_email()?.to_string()?,
             role: model::Role::ALL[u.get_role()? as usize],
             created: from_millis(u.get_created()),
@@ -49,10 +41,10 @@ impl Capn for model::User {
 }
 
 fn build_post(p: &model::Post, mut b: post::Builder) {
-    let (hi, lo) = split(p.id);
+    let (hi, lo) = p.id.as_u64_pair();
     b.set_id_hi(hi);
     b.set_id_lo(lo);
-    let (hi, lo) = split(p.author);
+    let (hi, lo) = p.author.as_u64_pair();
     b.set_author_hi(hi);
     b.set_author_lo(lo);
     b.set_slug(&p.slug[..]);
@@ -74,8 +66,8 @@ fn build_post(p: &model::Post, mut b: post::Builder) {
 
 pub fn read_post(p: post::Reader) -> capnp::Result<model::Post> {
     Ok(model::Post {
-        id: join(p.get_id_hi(), p.get_id_lo()),
-        author: join(p.get_author_hi(), p.get_author_lo()),
+        id: Uuid::from_u64_pair(p.get_id_hi(), p.get_id_lo()),
+        author: Uuid::from_u64_pair(p.get_author_hi(), p.get_author_lo()),
         slug: p.get_slug()?.to_string()?,
         title: p.get_title()?.to_string()?,
         state: model::PostState::ALL[p.get_state()? as usize],
@@ -104,7 +96,7 @@ impl Capn for model::Post {
 impl Capn for model::Document {
     fn capnp_build<A: message::Allocator>(&self, msg: &mut message::Builder<A>) {
         let mut d = msg.init_root::<document::Builder>();
-        let (hi, lo) = split(self.id);
+        let (hi, lo) = self.id.as_u64_pair();
         d.set_id_hi(hi);
         d.set_id_lo(lo);
         d.set_source(crate::rows_capnp::Source::try_from(self.source as u16).expect("source"));
@@ -112,7 +104,7 @@ impl Capn for model::Document {
         d.set_key(&self.key[..]);
         match self.parent {
             Some(p) => {
-                let (hi, lo) = split(p);
+                let (hi, lo) = p.as_u64_pair();
                 let mut g = d.reborrow().get_parent().init_uuid();
                 g.set_hi(hi);
                 g.set_lo(lo);
@@ -143,13 +135,13 @@ impl Capn for model::Document {
     fn capnp_read<S: ReaderSegments>(msg: &message::Reader<S>) -> capnp::Result<Self> {
         let d = msg.get_root::<document::Reader>()?;
         Ok(Self {
-            id: join(d.get_id_hi(), d.get_id_lo()),
+            id: Uuid::from_u64_pair(d.get_id_hi(), d.get_id_lo()),
             source: model::Source::ALL[d.get_source()? as usize],
             kind: model::DocumentKind::ALL[d.get_kind()? as usize],
             key: d.get_key()?.to_string()?,
             parent: match d.get_parent().which()? {
                 document::parent::Unset(()) => None,
-                document::parent::Uuid(g) => Some(join(g.get_hi(), g.get_lo())),
+                document::parent::Uuid(g) => Some(Uuid::from_u64_pair(g.get_hi(), g.get_lo())),
             },
             seq: match d.get_seq().which()? {
                 document::seq::Unset(()) => None,
