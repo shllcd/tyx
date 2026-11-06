@@ -544,34 +544,28 @@ fn expand_decode(input: &DeriveInput, name: &str, body: &Body) -> TokenStream {
         Body::Newtype(_) => quote!(::std::result::Result::Ok(Self(__tyx::Decode::decode(r)?))),
         Body::Struct(set) => decode_fields(&quote!(Self), set),
         Body::Enum(variants) => {
-            let known = || variants.iter().filter(|variant| !variant.holds_index());
-            let arms = known().map(|variant| {
+            let arms = variants.iter().filter(|variant| !variant.holds_index()).map(|variant| {
                 let variant_ident = &variant.ident;
-                let tag = u64::from(variant.index) << 1;
+                let index = variant.index;
                 match &variant.kind {
-                    VariantKind::Unit => quote!(#tag => ::std::result::Result::Ok(Self::#variant_ident),),
-                    VariantKind::Newtype(_) => {
-                        let tag = tag | 1;
+                    VariantKind::Unit => quote! {
+                        (#index, false) => ::std::result::Result::Ok(Self::#variant_ident),
+                        (#index, true) => ::std::result::Result::Err(__tyx::Error::UnexpectedPayload { ty: #name, index: #index }),
+                    },
+                    VariantKind::Newtype(_) => quote! {
+                        (#index, true) => {
+                            let (mut body, _) = r.frame()?;
+                            ::std::result::Result::Ok(Self::#variant_ident(__tyx::Decode::decode(&mut body)?))
+                        }
+                        (#index, false) => ::std::result::Result::Err(__tyx::Error::MissingPayload { ty: #name, index: #index }),
+                    },
+                    VariantKind::Fields(set) => {
+                        let fields = decode_fields(&quote!(Self::#variant_ident), set);
                         quote! {
-                            #tag => {
-                                let (mut body, _) = r.frame()?;
-                                ::std::result::Result::Ok(Self::#variant_ident(__tyx::Decode::decode(&mut body)?))
-                            }
+                            (#index, true) => { #fields }
+                            (#index, false) => ::std::result::Result::Err(__tyx::Error::MissingPayload { ty: #name, index: #index }),
                         }
                     }
-                    VariantKind::Fields(set) => {
-                        let tag = tag | 1;
-                        let fields = decode_fields(&quote!(Self::#variant_ident), set);
-                        quote!(#tag => { #fields })
-                    }
-                }
-            });
-            let mismatches = known().map(|variant| {
-                let index = variant.index;
-                if matches!(variant.kind, VariantKind::Unit) {
-                    quote!(#index => ::std::result::Result::Err(__tyx::Error::UnexpectedPayload { ty: #name, index }),)
-                } else {
-                    quote!(#index => ::std::result::Result::Err(__tyx::Error::MissingPayload { ty: #name, index }),)
                 }
             });
             let fallback = match variants.iter().find(|variant| variant.is_other) {
@@ -590,20 +584,13 @@ fn expand_decode(input: &DeriveInput, name: &str, body: &Body) -> TokenStream {
                 None => quote!(::std::result::Result::Err(__tyx::Error::UnknownVariant { ty: #name, index })),
             };
             quote! {
-                let tag = r.varint()?;
-                match tag {
+                match r.tag()? {
                     #(#arms)*
-                    _ => {
-                        let index = u32::try_from(tag >> 1).map_err(|_| __tyx::Error::VarintOverflow)?;
-                        match index {
-                            #(#mismatches)*
-                            _ => {
-                                if tag & 1 == 1 {
-                                    r.skip_frame()?;
-                                }
-                                #fallback
-                            }
+                    (index, has_payload) => {
+                        if has_payload {
+                            r.skip_frame()?;
                         }
+                        #fallback
                     }
                 }
             }
