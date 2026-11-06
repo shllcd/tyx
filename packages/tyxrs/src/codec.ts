@@ -545,10 +545,12 @@ class Compiler {
     type Write = (w: Writer, hasPayload: boolean, payload: unknown) => void;
     const otherName = def.other === undefined ? undefined : def.variants[def.other]?.name;
     const writers = new Map<string, Write>();
-    for (const [index, variant] of variantIndexes(def.variants)) {
+    const indexed = [...variantIndexes(def.variants)];
+    const knownIndexes = new Set(indexed.filter(([, variant]) => variant.name !== otherName).map(([index]) => index));
+    for (const [index, variant] of indexed) {
       if (writers.has(variant.name)) continue;
       const heldIndexMax = otherName === variant.name ? maxHeldIndex(variant) : undefined;
-      writers.set(variant.name, this.variantWriter(index, variant, heldIndexMax, args));
+      writers.set(variant.name, this.variantWriter(index, variant, heldIndexMax, knownIndexes, args));
     }
     return (w, value) => {
       let variantName: string;
@@ -578,6 +580,7 @@ class Compiler {
     index: number,
     variant: Variant,
     heldIndexMax: number | undefined,
+    knownIndexes: ReadonlySet<number>,
     args: readonly Ty[],
   ): (w: Writer, hasPayload: boolean, payload: unknown) => void {
     switch (variant.payload) {
@@ -585,7 +588,9 @@ class Compiler {
         const inner = this.encoder(variant.ty, args);
         return (w, hasPayload, payload) => {
           if (heldIndexMax !== undefined && hasPayload) {
-            w.tag(int(payload, 0, heldIndexMax), false);
+            const heldIndex = int(payload, 0, heldIndexMax);
+            if (knownIndexes.has(heldIndex)) throw new TyxError(`index ${heldIndex} belongs to a known variant`);
+            w.tag(heldIndex, false);
             return;
           }
           if (!hasPayload) throw new TyxError("variant needs a payload");

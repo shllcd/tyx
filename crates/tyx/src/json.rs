@@ -232,17 +232,23 @@ impl<'s> Cursor<'_, 's> {
                     }
                     _ => return Err(self.fail(format_args!("expected a `{name}` variant name or {{\"Variant\": payload}}"))),
                 };
-                let (index, variant) = variant_indexes(variants.iter().map(|variant| variant.index))
-                    .zip(variants)
+                let indexed: Vec<_> = variant_indexes(variants.iter().map(|variant| variant.index)).zip(variants).collect();
+                let (index, variant) = *indexed
+                    .iter()
                     .find(|(_, variant)| variant.name == variant_name)
                     .ok_or_else(|| self.fail(format_args!("`{variant_name}` is not a variant of `{name}`")))?;
-                let held_index_max = other
-                    .and_then(|other| variants.get(other))
-                    .filter(|other| other.name == variant_name)
-                    .and_then(Variant::max_held_index);
+                let other_variant = other.and_then(|other| variants.get(other));
+                let held_index_max = other_variant.filter(|other| other.name == variant_name).and_then(Variant::max_held_index);
                 self.scoped(format!(".{variant_name}"), |cursor| match (&variant.payload, payload) {
                     (Payload::Newtype { .. }, Some(payload)) if let Some(max) = held_index_max => {
-                        w.tag(cursor.int(payload, 0, max.into())? as u32, false);
+                        let held_index = cursor.int(payload, 0, max.into())? as u32;
+                        if indexed
+                            .iter()
+                            .any(|&(index, known)| index == held_index && other_variant.is_none_or(|other| other.name != known.name))
+                        {
+                            return Err(cursor.fail(format_args!("index {held_index} belongs to a known variant")));
+                        }
+                        w.tag(held_index, false);
                         Ok(())
                     }
                     (Payload::Unit, None | Some(Value::Null)) => {
