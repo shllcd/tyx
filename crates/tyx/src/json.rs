@@ -117,7 +117,12 @@ impl<'s> Cursor<'_, 's> {
     }
 
     fn float(&self, value: &Value) -> Result<f64, Error> {
-        value.as_f64().ok_or_else(|| self.fail("expected a number"))
+        match value {
+            Value::String(text) if text == "NaN" => Ok(f64::NAN),
+            Value::String(text) if text == "Infinity" => Ok(f64::INFINITY),
+            Value::String(text) if text == "-Infinity" => Ok(f64::NEG_INFINITY),
+            _ => value.as_f64().ok_or_else(|| self.fail("expected a number, \"NaN\", \"Infinity\" or \"-Infinity\"")),
+        }
     }
 
     fn int(&self, value: &Value, min: i128, max: i128) -> Result<i128, Error> {
@@ -325,8 +330,8 @@ impl<'s> Cursor<'_, 's> {
             Ty::I16 => Value::from(self.wire(i16::decode(r))?),
             Ty::I32 => Value::from(self.wire(i32::decode(r))?),
             Ty::I64 => Value::from(self.wire(i64::decode(r))?),
-            Ty::F32 => Number::from_f64(self.wire(f32::decode(r))?.into()).map_or(Value::Null, Value::Number),
-            Ty::F64 => Number::from_f64(self.wire(f64::decode(r))?).map_or(Value::Null, Value::Number),
+            Ty::F32 => float_value(self.wire(f32::decode(r))?.into()),
+            Ty::F64 => float_value(self.wire(f64::decode(r))?),
             Ty::Str => Value::String(self.wire(String::decode(r))?),
             Ty::Bytes => Value::String(hex(self.wire(r.len_prefixed())?)),
             Ty::Uuid => Value::String(hex_uuid(self.wire(r.array())?)),
@@ -451,5 +456,14 @@ impl<'s> Cursor<'_, 's> {
             Fields::Named(_) => Value::Object(named),
             Fields::Tuple(_) => Value::Array(items),
         })
+    }
+}
+
+fn float_value(x: f64) -> Value {
+    match Number::from_f64(x) {
+        Some(number) => Value::Number(number),
+        None if x.is_nan() => Value::from("NaN"),
+        None if x > 0.0 => Value::from("Infinity"),
+        None => Value::from("-Infinity"),
     }
 }
