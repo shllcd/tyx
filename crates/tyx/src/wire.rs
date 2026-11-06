@@ -295,16 +295,19 @@ impl<'de> Reader<'de> {
     /// Splits off the next frame and returns its body reader with the presence mask.
     #[inline]
     pub fn frame(&mut self) -> Result<(Self, u64), Error> {
-        let header = self.varint()?;
-        let len = usize::try_from(header >> 1).map_err(|_| Error::VarintOverflow)?;
-        let mut body = Self::new(self.take(len)?);
-        let mask = if header & 1 == 1 { body.varint()? } else { 0 };
+        let (mut body, has_mask) = self.frame_bytes()?;
+        let mask = if has_mask { body.varint()? } else { 0 };
         Ok((body, mask))
     }
 
     pub fn skip_frame(&mut self) -> Result<(), Error> {
+        self.frame_bytes().map(drop)
+    }
+
+    #[inline]
+    fn frame_bytes(&mut self) -> Result<(Self, bool), Error> {
         let header = self.varint()?;
         let len = usize::try_from(header >> 1).map_err(|_| Error::VarintOverflow)?;
-        self.take(len).map(drop)
+        Ok((Self::new(self.take(len)?), header & 1 == 1))
     }
 }
