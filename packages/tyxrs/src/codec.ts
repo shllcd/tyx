@@ -1,4 +1,4 @@
-import type { Def, Fields, Schema, Ty, Variant } from "./ir.js";
+import type { Def, Field, Fields, Schema, Ty, Variant } from "./ir.js";
 import { Reader, TyxError, Writer } from "./wire.js";
 
 const I64_MIN = -0x8000_0000_0000_0000n;
@@ -84,6 +84,25 @@ function* variantIndexes(variants: readonly Variant[]): Generator<[number, Varia
   }
 }
 
+function maskBits(fields: readonly Field[]): number[] {
+  let next = 0;
+  return fields.map((field) => (field.optional ? next++ : -1));
+}
+
+function maxHeldIndex(variant: Variant): number | undefined {
+  if (variant.payload !== "newtype") return undefined;
+  switch (variant.ty.kind) {
+    case "u8":
+      return 0xff;
+    case "u16":
+      return 0xffff;
+    case "u32":
+      return 0xffff_ffff;
+    default:
+      return undefined;
+  }
+}
+
 function substitute(ty: Ty, env: readonly Ty[]): Ty {
   switch (ty.kind) {
     case "param":
@@ -136,10 +155,6 @@ function zeroValue(ty: Ty): () => unknown {
   }
 }
 
-function fail(message: string): TyxError {
-  return new TyxError(message);
-}
-
 function within(error: unknown, segment: string): unknown {
   if (error instanceof TyxError) error.path = segment + error.path;
   return error;
@@ -179,7 +194,7 @@ function show(value: unknown): string {
 
 function int(value: unknown, min: number, max: number): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
-    throw fail(`expected an integer in ${min}..=${max}, got ${show(value)}`);
+    throw new TyxError(`expected an integer in ${min}..=${max}, got ${show(value)}`);
   }
   return value;
 }
@@ -188,19 +203,19 @@ function bigint(value: unknown, min: bigint, max: bigint): bigint {
   const result =
     typeof value === "bigint" ? value : typeof value === "number" && Number.isSafeInteger(value) ? BigInt(value) : undefined;
   if (result === undefined || result < min || result > max) {
-    throw fail(`expected an integer in ${min}..=${max}, got ${show(value)}`);
+    throw new TyxError(`expected an integer in ${min}..=${max}, got ${show(value)}`);
   }
   return result;
 }
 
 function string(value: unknown): string {
-  if (typeof value !== "string") throw fail("expected a string");
-  if (!isWellFormed(value)) throw fail("expected a well-formed string");
+  if (typeof value !== "string") throw new TyxError("expected a string");
+  if (!isWellFormed(value)) throw new TyxError("expected a well-formed string");
   return value;
 }
 
 function float(value: unknown): number {
-  if (typeof value !== "number") throw fail("expected a number");
+  if (typeof value !== "number") throw new TyxError("expected a number");
   return value;
 }
 
@@ -218,12 +233,12 @@ function hexValue(code: number): number {
 }
 
 function parseHex(value: unknown): Uint8Array {
-  if (typeof value !== "string" || value.length % 2 !== 0) throw fail("expected a hex string");
+  if (typeof value !== "string" || value.length % 2 !== 0) throw new TyxError("expected a hex string");
   const bytes = new Uint8Array(value.length / 2);
   for (let index = 0; index < bytes.length; index++) {
     const high = hexValue(value.charCodeAt(index * 2));
     const low = hexValue(value.charCodeAt(index * 2 + 1));
-    if (high < 0 || low < 0) throw fail("expected a hex string");
+    if (high < 0 || low < 0) throw new TyxError("expected a hex string");
     bytes[index] = high * 16 + low;
   }
   return bytes;
@@ -236,7 +251,7 @@ function formatHex(bytes: Uint8Array): string {
 }
 
 function parseUuid(value: unknown): Uint8Array {
-  if (typeof value !== "string" || value.length !== 36) throw fail("expected a hyphenated uuid");
+  if (typeof value !== "string" || value.length !== 36) throw new TyxError("expected a hyphenated uuid");
   const bytes = uuidScratch;
   let nibble = 0;
   let isHex = true;
@@ -248,8 +263,8 @@ function parseUuid(value: unknown): Uint8Array {
     if (nibble < 32) bytes[nibble >> 1] = (nibble & 1) === 0 ? digit << 4 : bytes[nibble >> 1]! | digit;
     nibble++;
   }
-  if (nibble !== 32) throw fail("expected a hyphenated uuid");
-  if (!isHex) throw fail("expected a hex string");
+  if (nibble !== 32) throw new TyxError("expected a hyphenated uuid");
+  if (!isHex) throw new TyxError("expected a hex string");
   return bytes;
 }
 
@@ -265,9 +280,9 @@ function formatUuid(bytes: Uint8Array): string {
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 function parseTimestamp(value: unknown): number {
-  if (typeof value !== "string" || !RFC3339.test(value)) throw fail("expected an RFC 3339 timestamp");
+  if (typeof value !== "string" || !RFC3339.test(value)) throw new TyxError("expected an RFC 3339 timestamp");
   const millis = Date.parse(value);
-  if (Number.isNaN(millis)) throw fail("expected an RFC 3339 timestamp");
+  if (Number.isNaN(millis)) throw new TyxError("expected an RFC 3339 timestamp");
   return millis;
 }
 
@@ -284,7 +299,7 @@ function pad4(value: number): string {
 }
 
 function formatTimestamp(millis: number): string {
-  if (!(millis >= MIN_TIMESTAMP_MILLIS && millis <= MAX_TIMESTAMP_MILLIS)) throw fail("timestamp out of range");
+  if (!(millis >= MIN_TIMESTAMP_MILLIS && millis <= MAX_TIMESTAMP_MILLIS)) throw new TyxError("timestamp out of range");
   const days = Math.floor(millis / MILLIS_PER_DAY);
   const millisOfDay = millis - days * MILLIS_PER_DAY;
   const shifted = days + 719_468;
@@ -308,7 +323,7 @@ function formatTimestamp(millis: number): string {
 function unsigned(max: number): Decode {
   return (r) => {
     const value = r.varintNumber();
-    if (value > max) throw fail("varint does not fit its type");
+    if (value > max) throw new TyxError("varint does not fit its type");
     return value;
   };
 }
@@ -316,7 +331,7 @@ function unsigned(max: number): Decode {
 function signed(min: number, max: number): Decode {
   return (r) => {
     const value = r.zigzagNumber();
-    if (value < min || value > max) throw fail("varint does not fit its type");
+    if (value < min || value > max) throw new TyxError("varint does not fit its type");
     return value;
   };
 }
@@ -329,7 +344,7 @@ function maskHas(mask: number | bigint, bit: number): boolean {
 
 function unbound(index: number): () => never {
   return () => {
-    throw fail(`unbound parameter $${index}`);
+    throw new TyxError(`unbound parameter $${index}`);
   };
 }
 
@@ -344,7 +359,7 @@ class Compiler {
 
   private def(name: string): Def {
     const def = this.types.get(name);
-    if (def === undefined) throw fail(`unknown type \`${name}\``);
+    if (def === undefined) throw new TyxError(`unknown type \`${name}\``);
     return def;
   }
 
@@ -400,7 +415,7 @@ class Compiler {
         return () => {};
       case "bool":
         return (w, value) => {
-          if (typeof value !== "boolean") throw fail("expected a boolean");
+          if (typeof value !== "boolean") throw new TyxError("expected a boolean");
           w.byte(value ? 1 : 0);
         };
       case "u8":
@@ -452,7 +467,7 @@ class Compiler {
       case "set": {
         const item = this.encoder(ty.of, env);
         return (w, value) => {
-          if (!Array.isArray(value)) throw fail("expected an array");
+          if (!Array.isArray(value)) throw new TyxError("expected an array");
           w.uvarint(value.length);
           writeItems(w, item, value);
         };
@@ -461,14 +476,14 @@ class Compiler {
         const item = this.encoder(ty.of, env);
         const len = ty.len;
         return (w, value) => {
-          if (!Array.isArray(value) || value.length !== len) throw fail(`expected an array of ${len}`);
+          if (!Array.isArray(value) || value.length !== len) throw new TyxError(`expected an array of ${len}`);
           writeItems(w, item, value);
         };
       }
       case "tuple": {
         const items = ty.of.map((item) => this.encoder(item, env));
         return (w, value) => {
-          if (!Array.isArray(value) || value.length !== items.length) throw fail(`expected an array of ${items.length}`);
+          if (!Array.isArray(value) || value.length !== items.length) throw new TyxError(`expected an array of ${items.length}`);
           for (let index = 0; index < items.length; index++) {
             try {
               items[index]!(w, value[index]);
@@ -498,7 +513,7 @@ class Compiler {
     const encodeValue = this.encoder(value, env);
     return (w, map) => {
       if (isRecord(map)) {
-        if (!hasStringKeys) throw fail("only maps with string keys are objects; use [[key, value], ...]");
+        if (!hasStringKeys) throw new TyxError("only maps with string keys are objects; use [[key, value], ...]");
         const names = Object.keys(map);
         w.uvarint(names.length);
         for (const name of names) {
@@ -511,12 +526,12 @@ class Compiler {
         }
         return;
       }
-      if (!Array.isArray(map)) throw fail("expected an object or an array of [key, value]");
+      if (!Array.isArray(map)) throw new TyxError("expected an object or an array of [key, value]");
       w.uvarint(map.length);
       for (let index = 0; index < map.length; index++) {
         try {
           const pair: unknown = map[index];
-          if (!Array.isArray(pair) || pair.length !== 2) throw fail("expected [key, value]");
+          if (!Array.isArray(pair) || pair.length !== 2) throw new TyxError("expected [key, value]");
           encodeKey(w, pair[0]);
           encodeValue(w, pair[1]);
         } catch (error) {
@@ -532,8 +547,8 @@ class Compiler {
     const writers = new Map<string, Write>();
     for (const [index, variant] of variantIndexes(def.variants)) {
       if (writers.has(variant.name)) continue;
-      const isOther = otherName === variant.name;
-      writers.set(variant.name, this.variantWriter(index, variant, isOther, args));
+      const heldIndexMax = otherName === variant.name ? maxHeldIndex(variant) : undefined;
+      writers.set(variant.name, this.variantWriter(index, variant, heldIndexMax, args));
     }
     return (w, value) => {
       let variantName: string;
@@ -544,13 +559,13 @@ class Compiler {
         hasPayload = false;
       } else {
         const key = isRecord(value) ? soleKey(value) : undefined;
-        if (key === undefined) throw fail(`expected a \`${def.name}\` variant name or {"Variant": payload}`);
+        if (key === undefined) throw new TyxError(`expected a \`${def.name}\` variant name or {"Variant": payload}`);
         variantName = key;
         hasPayload = true;
         payload = (value as Record<string, unknown>)[key];
       }
       const write = writers.get(variantName);
-      if (write === undefined) throw fail(`\`${variantName}\` is not a variant of \`${def.name}\``);
+      if (write === undefined) throw new TyxError(`\`${variantName}\` is not a variant of \`${def.name}\``);
       try {
         write(w, hasPayload, payload);
       } catch (error) {
@@ -562,19 +577,18 @@ class Compiler {
   private variantWriter(
     index: number,
     variant: Variant,
-    isOther: boolean,
+    heldIndexMax: number | undefined,
     args: readonly Ty[],
   ): (w: Writer, hasPayload: boolean, payload: unknown) => void {
     switch (variant.payload) {
       case "newtype": {
         const inner = this.encoder(variant.ty, args);
-        const maxOther = variant.ty.kind === "u8" ? 0xff : variant.ty.kind === "u16" ? 0xffff : 0xffff_ffff;
         return (w, hasPayload, payload) => {
-          if (isOther && hasPayload) {
-            w.tag(int(payload, 0, maxOther), false);
+          if (heldIndexMax !== undefined && hasPayload) {
+            w.tag(int(payload, 0, heldIndexMax), false);
             return;
           }
-          if (!hasPayload) throw fail("variant needs a payload");
+          if (!hasPayload) throw new TyxError("variant needs a payload");
           w.tag(index, true);
           const frame = w.begin(0);
           inner(w, payload);
@@ -583,13 +597,13 @@ class Compiler {
       }
       case "unit":
         return (w, hasPayload, payload) => {
-          if (hasPayload && payload !== null) throw fail("unit variant takes no payload");
+          if (hasPayload && payload !== null) throw new TyxError("unit variant takes no payload");
           w.tag(index, false);
         };
       case "fields": {
         const fields = this.fieldsEncoder(variant.fields, args);
         return (w, hasPayload, payload) => {
-          if (!hasPayload) throw fail("variant needs a payload");
+          if (!hasPayload) throw new TyxError("variant needs a payload");
           w.tag(index, true);
           fields(w, payload);
         };
@@ -605,9 +619,7 @@ class Compiler {
     const optional = list.map((field) => field.optional === true);
     const optionalCount = optional.filter(Boolean).length;
     const isWide = optionalCount > MAX_NUMBER_MASK_BITS;
-    const maskBits: number[] = [];
-    let nextBit = 0;
-    for (const isOptional of optional) maskBits.push(isOptional ? nextBit++ : -1);
+    const bits = maskBits(list);
     const known = new Set(list.flatMap((field) => (field.name === undefined ? [] : [field.name])));
     const isNamed = fields.style === "named";
 
@@ -615,9 +627,9 @@ class Compiler {
 
     const collect = (value: unknown): readonly unknown[] => {
       if (isNamed) {
-        if (!isRecord(value)) throw fail("expected an object");
+        if (!isRecord(value)) throw new TyxError("expected an object");
         for (const key in value) {
-          if (hasOwn.call(value, key) && !known.has(key)) throw fail(`unknown field \`${key}\``);
+          if (hasOwn.call(value, key) && !known.has(key)) throw new TyxError(`unknown field \`${key}\``);
         }
         const values: unknown[] = new Array(count);
         for (let index = 0; index < count; index++) {
@@ -626,7 +638,7 @@ class Compiler {
         }
         return values;
       }
-      if (!Array.isArray(value) || value.length !== count) throw fail(`expected an array of ${count}`);
+      if (!Array.isArray(value) || value.length !== count) throw new TyxError(`expected an array of ${count}`);
       return value;
     };
 
@@ -635,13 +647,13 @@ class Compiler {
       if (isWide) {
         let mask = 0n;
         for (let index = 0; index < count; index++) {
-          if (optional[index] && values[index] !== undefined) mask |= 1n << BigInt(maskBits[index]!);
+          if (optional[index] && values[index] !== undefined) mask |= 1n << BigInt(bits[index]!);
         }
         return mask;
       }
       let mask = 0;
       for (let index = 0; index < count; index++) {
-        if (optional[index] && values[index] !== undefined) mask += 2 ** maskBits[index]!;
+        if (optional[index] && values[index] !== undefined) mask += 2 ** bits[index]!;
       }
       return mask;
     };
@@ -658,7 +670,7 @@ class Compiler {
             throw within(error, segment(index));
           }
         } else if (!optional[index]) {
-          throw fail(`missing field \`${list[index]!.name ?? ""}\``);
+          throw new TyxError(`missing field \`${list[index]!.name ?? ""}\``);
         }
       }
       w.end(frame);
@@ -672,7 +684,7 @@ class Compiler {
       case "bool":
         return (r) => {
           const byte = r.byte();
-          if (byte > 1) throw fail(`invalid bool byte 0x${byte.toString(16).padStart(2, "0")}`);
+          if (byte > 1) throw new TyxError(`invalid bool byte 0x${byte.toString(16).padStart(2, "0")}`);
           return byte === 1;
         };
       case "u8":
@@ -712,7 +724,7 @@ class Compiler {
           const tag = r.byte();
           if (tag === 0) return null;
           if (tag === 1) return inner(r);
-          throw fail(`invalid bool byte 0x${tag.toString(16).padStart(2, "0")}`);
+          throw new TyxError(`invalid bool byte 0x${tag.toString(16).padStart(2, "0")}`);
         };
       }
       case "seq":
@@ -790,7 +802,7 @@ class Compiler {
     const positions = new Map<number, number>();
     let position = 0;
     for (const [index, variant] of variantIndexes(def.variants)) {
-      const isOtherWithIndex = position === def.other && variant.payload !== "unit";
+      const isOtherWithIndex = position === def.other && maxHeldIndex(variant) !== undefined;
       if (!isOtherWithIndex && !positions.has(index)) positions.set(index, position);
       position++;
     }
@@ -804,7 +816,7 @@ class Compiler {
       if (found === undefined) {
         if (hasPayload) r.skipFrame();
         if (fallback !== undefined) return fallback.payload === "unit" ? fallback.name : { [fallback.name]: index };
-        throw fail(`\`${def.name}\` has no variant ${index}`);
+        throw new TyxError(`\`${def.name}\` has no variant ${index}`);
       }
       try {
         return readers[found]!(r, hasPayload);
@@ -819,13 +831,13 @@ class Compiler {
     switch (variant.payload) {
       case "unit":
         return (_, hasPayload) => {
-          if (hasPayload) throw fail("unexpected payload on a unit variant");
+          if (hasPayload) throw new TyxError("unexpected payload on a unit variant");
           return name;
         };
       case "newtype": {
         const inner = this.decoder(variant.ty, args);
         return (r, hasPayload) => {
-          if (!hasPayload) throw fail("missing payload");
+          if (!hasPayload) throw new TyxError("missing payload");
           r.enterFrame();
           const payload = inner(r);
           r.leaveFrame();
@@ -835,7 +847,7 @@ class Compiler {
       case "fields": {
         const fields = this.fieldsDecoder(variant.fields, args);
         return (r, hasPayload) => {
-          if (!hasPayload) throw fail("missing payload");
+          if (!hasPayload) throw new TyxError("missing payload");
           return { [name]: fields(r) };
         };
       }
@@ -848,56 +860,33 @@ class Compiler {
     const decoders = list.map((field) => this.decoder(field.ty, env));
     const names = list.map((field) => field.name ?? "");
     const zeros = list.map((field) => (field.default ? zeroValue(substitute(field.ty, env)) : undefined));
-    const maskBits: number[] = [];
-    let nextBit = 0;
-    for (const field of list) maskBits.push(field.optional ? nextBit++ : -1);
+    const bits = maskBits(list);
+    const isNamed = fields.style === "named";
 
     const segment = (index: number) => (list[index]!.name ? `.${list[index]!.name}` : `[${index}]`);
 
-    if (fields.style === "named") {
-      return (r) => {
-        const mask = r.enterFrame();
-        const named: Record<string, unknown> = Object.create(null);
-        for (let index = 0; index < count; index++) {
-          const bit = maskBits[index]!;
-          if (bit >= 0 && !maskHas(mask, bit)) continue;
-          const zero = zeros[index];
-          if (zero !== undefined && r.isEmpty) {
-            named[names[index]!] = zero();
-            continue;
-          }
-          try {
-            named[names[index]!] = decoders[index]!(r);
-          } catch (error) {
-            throw within(error, segment(index));
-          }
-        }
-        r.leaveFrame();
-        return named;
-      };
-    }
+    const read = (r: Reader, mask: number | bigint, index: number): unknown => {
+      const bit = bits[index]!;
+      if (bit >= 0 && !maskHas(mask, bit)) return undefined;
+      const zero = zeros[index];
+      if (zero !== undefined && r.isEmpty) return zero();
+      try {
+        return decoders[index]!(r);
+      } catch (error) {
+        throw within(error, segment(index));
+      }
+    };
+
     return (r) => {
       const mask = r.enterFrame();
-      const items: unknown[] = new Array(count);
+      const decoded: Record<string, unknown> | unknown[] = isNamed ? Object.create(null) : new Array(count);
       for (let index = 0; index < count; index++) {
-        const bit = maskBits[index]!;
-        if (bit >= 0 && !maskHas(mask, bit)) {
-          items[index] = undefined;
-          continue;
-        }
-        const zero = zeros[index];
-        if (zero !== undefined && r.isEmpty) {
-          items[index] = zero();
-          continue;
-        }
-        try {
-          items[index] = decoders[index]!(r);
-        } catch (error) {
-          throw within(error, segment(index));
-        }
+        const value = read(r, mask, index);
+        if (!isNamed) (decoded as unknown[])[index] = value;
+        else if (value !== undefined) (decoded as Record<string, unknown>)[names[index]!] = value;
       }
       r.leaveFrame();
-      return items;
+      return decoded;
     };
   }
 }
