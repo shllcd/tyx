@@ -141,7 +141,13 @@ impl<'s> Cursor<'_, 's> {
             Ty::I16 => (self.int(value, i16::MIN.into(), i16::MAX.into())? as i16).encode(w),
             Ty::I32 => (self.int(value, i32::MIN.into(), i32::MAX.into())? as i32).encode(w),
             Ty::I64 => (self.int(value, i64::MIN.into(), i64::MAX.into())? as i64).encode(w),
-            Ty::F32 => (self.float(value)? as f32).encode(w),
+            Ty::F32 => {
+                let x = self.float(value)?;
+                if x.is_finite() && (x as f32).is_infinite() {
+                    return Err(self.fail(format_args!("{x:e} does not fit in an f32")));
+                }
+                (x as f32).encode(w)
+            }
             Ty::F64 => self.float(value)?.encode(w),
             Ty::Str => value.as_str().ok_or_else(|| self.fail("expected a string"))?.encode(w),
             Ty::Bytes => w.len_prefixed(&value.as_str().and_then(parse_hex).ok_or_else(|| self.fail("expected a hex string"))?),
