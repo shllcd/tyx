@@ -198,8 +198,8 @@ pub fn touch(p: post::Reader) -> capnp::Result<u64> {
     for t in p.get_tags()? {
         tags += t?.to_str()?.len() as u64;
     }
-    Ok(p.get_id_hi()
-        + p.get_author_hi()
+    Ok((p.get_id_hi() >> 56)
+        + (p.get_author_hi() >> 56)
         + p.get_slug()?.to_str()?.len() as u64
         + p.get_title()?.to_str()?.len() as u64
         + p.get_state()? as u64

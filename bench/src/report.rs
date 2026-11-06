@@ -277,6 +277,8 @@ pub fn post_access(post: &Post) {
     assert_eq!(touch_ref(&postcard_ref(&postcard)), expect_touch);
     assert_eq!(touch_rkyv(rkyv_checked(&rkyv)), expect_touch);
     assert_eq!(flat::touch(fb_checked(&fbuf)), expect_touch);
+    assert_eq!(touch_ref(&bincode_ref(&bincode)), expect_touch);
+    assert_eq!(capnp_touch(&cbuf).expect("capnp"), expect_touch);
 
     println!("\n## Post: borrowed / zero-copy access\n");
     println!(
