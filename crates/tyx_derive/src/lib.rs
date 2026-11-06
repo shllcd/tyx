@@ -6,14 +6,13 @@ use syn::{
     Attribute, Data, DeriveInput, Fields, GenericArgument, GenericParam, Generics, Ident, LitStr, Member, PathArguments, Type,
     parse_macro_input, parse_quote,
 };
+use tyx_ir::{MAX_OPTIONAL_FIELDS, variant_indexes};
 
 #[proc_macro_derive(Type, attributes(tyx))]
 pub fn derive_type(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(&input).unwrap_or_else(syn::Error::into_compile_error).into()
 }
-
-const MAX_OPTIONAL_FIELDS: usize = 64;
 
 #[derive(Default)]
 struct ContainerAttrs {
@@ -76,7 +75,7 @@ struct VariantInfo {
     kind: VariantKind,
     is_other: bool,
     index: u32,
-    is_pinned: bool,
+    pinned: Option<u32>,
 }
 
 impl VariantInfo {
@@ -106,12 +105,13 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             fields => Body::Struct(field_set(fields)?),
         },
         Data::Enum(data) => {
+            let pinned = data
+                .variants
+                .iter()
+                .map(|variant| variant.discriminant.as_ref().map(|(_, expr)| pinned_index(expr)).transpose())
+                .collect::<syn::Result<Vec<_>>>()?;
             let mut variants = Vec::with_capacity(data.variants.len());
-            let mut next_index = 0u32;
-            for variant in &data.variants {
-                let pinned = variant.discriminant.as_ref().map(|(_, expr)| pinned_index(expr)).transpose()?;
-                let index = pinned.unwrap_or(next_index);
-                next_index = index.wrapping_add(1);
+            for ((variant, pinned), index) in data.variants.iter().zip(&pinned).zip(variant_indexes(pinned.iter().copied())) {
                 let is_other = variant_is_other(&variant.attrs)?;
                 let kind = match &variant.fields {
                     Fields::Unit => VariantKind::Unit,
@@ -124,7 +124,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 if is_other && matches!(kind, VariantKind::Fields(_)) {
                     return Err(syn::Error::new_spanned(variant, "#[tyx(other)] requires a unit variant or one holding the index"));
                 }
-                variants.push(VariantInfo { ident: variant.ident.clone(), kind, is_other, index, is_pinned: pinned.is_some() });
+                variants.push(VariantInfo { ident: variant.ident.clone(), kind, is_other, index, pinned: *pinned });
             }
             if variants.iter().filter(|variant| variant.is_other).count() > 1 {
                 return Err(syn::Error::new_spanned(&input.ident, "only one variant may be #[tyx(other)]"));
@@ -356,11 +356,9 @@ fn expand_type(input: &DeriveInput, attrs: &ContainerAttrs, name: &str, body: &B
                         quote!(__tyx::ir::Payload::Fields { fields: #fields })
                     }
                 };
-                let index = if variant.is_pinned {
-                    let index = variant.index;
-                    quote!(::std::option::Option::Some(#index))
-                } else {
-                    quote!(::std::option::Option::None)
+                let index = match variant.pinned {
+                    Some(index) => quote!(::std::option::Option::Some(#index)),
+                    None => quote!(::std::option::Option::None),
                 };
                 quote!(__tyx::ir::Variant { name: #name.to_owned(), index: #index, payload: #payload })
             });

@@ -13,9 +13,9 @@ use std::fmt;
 use serde_json::{Map, Number, Value};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tyx_ir::{Def, Field, Fields, Payload, Schema, Shape, Ty, variant_indexes};
+use tyx_ir::{Def, Fields, Payload, Schema, Shape, Ty, Variant, variant_indexes};
 
-use crate::{Reader, Writer};
+use crate::{Decode, Encode, Reader, Writer};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
@@ -61,29 +61,6 @@ struct Cursor<'c, 's> {
     path: Vec<String>,
 }
 
-fn optional_bits(fields: &[Field]) -> impl Iterator<Item = (Option<u32>, &Field)> {
-    fields.iter().scan(0u32, |next, field| {
-        let bit = field.optional.then(|| {
-            *next += 1;
-            *next - 1
-        });
-        Some((bit, field))
-    })
-}
-
-fn zero_value(ty: &Ty) -> Value {
-    match ty {
-        Ty::Bool => Value::Bool(false),
-        Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 => Value::from(0),
-        Ty::F32 | Ty::F64 => Value::from(0.0),
-        Ty::Str | Ty::Bytes => Value::String(String::new()),
-        Ty::Seq { .. } | Ty::Set { .. } => Value::Array(Vec::new()),
-        Ty::Map { key, .. } if **key == Ty::Str => Value::Object(Map::new()),
-        Ty::Map { .. } => Value::Array(Vec::new()),
-        _ => Value::Null,
-    }
-}
-
 fn hex_uuid(bytes: [u8; 16]) -> String {
     let mut out = String::with_capacity(36);
     for (index, byte) in bytes.iter().enumerate() {
@@ -124,6 +101,10 @@ impl<'s> Cursor<'_, 's> {
         Error { path: self.path.concat(), message: message.to_string() }
     }
 
+    fn wire<T>(&self, result: Result<T, crate::Error>) -> Result<T, Error> {
+        result.map_err(|error| self.fail(error))
+    }
+
     fn def(&self, name: &str) -> Result<&'s Def, Error> {
         self.codec.types.get(name).copied().ok_or_else(|| self.fail(format_args!("unknown type `{name}`")))
     }
@@ -133,6 +114,10 @@ impl<'s> Cursor<'_, 's> {
         let result = run(self);
         self.path.pop();
         result
+    }
+
+    fn float(&self, value: &Value) -> Result<f64, Error> {
+        value.as_f64().ok_or_else(|| self.fail("expected a number"))
     }
 
     fn int(&self, value: &Value, min: i128, max: i128) -> Result<i128, Error> {
@@ -147,27 +132,26 @@ impl<'s> Cursor<'_, 's> {
     fn write(&mut self, w: &mut Writer, ty: &Ty, env: &[Ty], value: &Value) -> Result<(), Error> {
         match ty {
             Ty::Unit => {}
-            Ty::Bool => w.byte(u8::from(value.as_bool().ok_or_else(|| self.fail("expected a boolean"))?)),
-            Ty::U8 => w.byte(self.int(value, 0, 255)? as u8),
-            Ty::I8 => w.byte(self.int(value, -128, 127)? as i8 as u8),
-            Ty::U16 => w.varint(self.int(value, 0, u16::MAX.into())? as u64),
-            Ty::U32 => w.varint(self.int(value, 0, u32::MAX.into())? as u64),
-            Ty::U64 => w.varint(self.int(value, 0, u64::MAX.into())? as u64),
-            Ty::I16 => w.zigzag(self.int(value, i16::MIN.into(), i16::MAX.into())? as i64),
-            Ty::I32 => w.zigzag(self.int(value, i32::MIN.into(), i32::MAX.into())? as i64),
-            Ty::I64 => w.zigzag(self.int(value, i64::MIN.into(), i64::MAX.into())? as i64),
-            Ty::F32 => w.bytes(&(value.as_f64().ok_or_else(|| self.fail("expected a number"))? as f32).to_le_bytes()),
-            Ty::F64 => w.bytes(&value.as_f64().ok_or_else(|| self.fail("expected a number"))?.to_le_bytes()),
-            Ty::Str => w.len_prefixed(value.as_str().ok_or_else(|| self.fail("expected a string"))?.as_bytes()),
+            Ty::Bool => value.as_bool().ok_or_else(|| self.fail("expected a boolean"))?.encode(w),
+            Ty::U8 => (self.int(value, 0, u8::MAX.into())? as u8).encode(w),
+            Ty::I8 => (self.int(value, i8::MIN.into(), i8::MAX.into())? as i8).encode(w),
+            Ty::U16 => (self.int(value, 0, u16::MAX.into())? as u16).encode(w),
+            Ty::U32 => (self.int(value, 0, u32::MAX.into())? as u32).encode(w),
+            Ty::U64 => (self.int(value, 0, u64::MAX.into())? as u64).encode(w),
+            Ty::I16 => (self.int(value, i16::MIN.into(), i16::MAX.into())? as i16).encode(w),
+            Ty::I32 => (self.int(value, i32::MIN.into(), i32::MAX.into())? as i32).encode(w),
+            Ty::I64 => (self.int(value, i64::MIN.into(), i64::MAX.into())? as i64).encode(w),
+            Ty::F32 => (self.float(value)? as f32).encode(w),
+            Ty::F64 => self.float(value)?.encode(w),
+            Ty::Str => value.as_str().ok_or_else(|| self.fail("expected a string"))?.encode(w),
             Ty::Bytes => w.len_prefixed(&value.as_str().and_then(parse_hex).ok_or_else(|| self.fail("expected a hex string"))?),
             Ty::Uuid => w.bytes(&value.as_str().and_then(parse_uuid).ok_or_else(|| self.fail("expected a hyphenated uuid"))?),
             Ty::Timestamp => {
                 let text = value.as_str().ok_or_else(|| self.fail("expected an RFC 3339 timestamp"))?;
-                let at = OffsetDateTime::parse(text, &Rfc3339).map_err(|error| self.fail(error))?;
-                w.zigzag(at.unix_timestamp_nanos().div_euclid(1_000_000) as i64);
+                OffsetDateTime::parse(text, &Rfc3339).map_err(|error| self.fail(error))?.encode(w);
             }
             Ty::Option { of } => {
-                w.byte(u8::from(!value.is_null()));
+                (!value.is_null()).encode(w);
                 if !value.is_null() {
                     self.write(w, of, env, value)?;
                 }
@@ -248,19 +232,17 @@ impl<'s> Cursor<'_, 's> {
                     }
                     _ => return Err(self.fail(format_args!("expected a `{name}` variant name or {{\"Variant\": payload}}"))),
                 };
-                let (index, variant) = variant_indexes(variants)
+                let (index, variant) = variant_indexes(variants.iter().map(|variant| variant.index))
                     .zip(variants)
                     .find(|(_, variant)| variant.name == variant_name)
                     .ok_or_else(|| self.fail(format_args!("`{variant_name}` is not a variant of `{name}`")))?;
-                let is_other = other.and_then(|other| variants.get(other)).is_some_and(|other| other.name == variant_name);
+                let held_index_max = other
+                    .and_then(|other| variants.get(other))
+                    .filter(|other| other.name == variant_name)
+                    .and_then(Variant::max_held_index);
                 self.scoped(format!(".{variant_name}"), |cursor| match (&variant.payload, payload) {
-                    (Payload::Newtype { ty }, Some(payload)) if is_other => {
-                        let max = match ty {
-                            Ty::U8 => u8::MAX.into(),
-                            Ty::U16 => u16::MAX.into(),
-                            _ => u32::MAX.into(),
-                        };
-                        w.tag(cursor.int(payload, 0, max)? as u32, false);
+                    (Payload::Newtype { .. }, Some(payload)) if let Some(max) = held_index_max => {
+                        w.tag(cursor.int(payload, 0, max.into())? as u32, false);
                         Ok(())
                     }
                     (Payload::Unit, None | Some(Value::Null)) => {
@@ -299,7 +281,7 @@ impl<'s> Cursor<'_, 's> {
             (Fields::Tuple(_), _) => return Err(self.fail(format_args!("expected an array of {}", slice.len()))),
         };
         let mut mask = 0u64;
-        for ((bit, _), value) in optional_bits(slice).zip(&values) {
+        for ((bit, _), value) in fields.optional_bits().zip(&values) {
             if let (Some(bit), Some(_)) = (bit, value) {
                 mask |= 1u64 << bit;
             }
@@ -318,41 +300,32 @@ impl<'s> Cursor<'_, 's> {
     }
 
     fn read(&mut self, r: &mut Reader<'_>, ty: &Ty, env: &[Ty]) -> Result<Value, Error> {
-        let wire = |cursor: &Self, error: crate::Error| cursor.fail(error);
         Ok(match ty {
             Ty::Unit => Value::Null,
-            Ty::Bool => match r.byte().map_err(|e| wire(self, e))? {
-                0 => Value::Bool(false),
-                1 => Value::Bool(true),
-                byte => return Err(self.fail(crate::Error::InvalidBool(byte))),
-            },
-            Ty::U8 => Value::from(r.byte().map_err(|e| wire(self, e))?),
-            Ty::I8 => Value::from(r.byte().map_err(|e| wire(self, e))?.cast_signed()),
-            Ty::U16 | Ty::U32 | Ty::U64 => Value::from(r.varint().map_err(|e| wire(self, e))?),
-            Ty::I16 | Ty::I32 | Ty::I64 => Value::from(r.zigzag().map_err(|e| wire(self, e))?),
-            Ty::F32 => {
-                Number::from_f64(f32::from_le_bytes(r.array().map_err(|e| wire(self, e))?).into()).map_or(Value::Null, Value::Number)
-            }
-            Ty::F64 => Number::from_f64(f64::from_le_bytes(r.array().map_err(|e| wire(self, e))?)).map_or(Value::Null, Value::Number),
-            Ty::Str => {
-                let bytes = r.len_prefixed().map_err(|e| wire(self, e))?;
-                Value::String(std::str::from_utf8(bytes).map_err(|_| self.fail(crate::Error::InvalidUtf8))?.to_owned())
-            }
-            Ty::Bytes => Value::String(hex(r.len_prefixed().map_err(|e| wire(self, e))?)),
-            Ty::Uuid => Value::String(hex_uuid(r.array().map_err(|e| wire(self, e))?)),
+            Ty::Bool => Value::Bool(self.wire(bool::decode(r))?),
+            Ty::U8 => Value::from(self.wire(u8::decode(r))?),
+            Ty::I8 => Value::from(self.wire(i8::decode(r))?),
+            Ty::U16 => Value::from(self.wire(u16::decode(r))?),
+            Ty::U32 => Value::from(self.wire(u32::decode(r))?),
+            Ty::U64 => Value::from(self.wire(u64::decode(r))?),
+            Ty::I16 => Value::from(self.wire(i16::decode(r))?),
+            Ty::I32 => Value::from(self.wire(i32::decode(r))?),
+            Ty::I64 => Value::from(self.wire(i64::decode(r))?),
+            Ty::F32 => Number::from_f64(self.wire(f32::decode(r))?.into()).map_or(Value::Null, Value::Number),
+            Ty::F64 => Number::from_f64(self.wire(f64::decode(r))?).map_or(Value::Null, Value::Number),
+            Ty::Str => Value::String(self.wire(String::decode(r))?),
+            Ty::Bytes => Value::String(hex(self.wire(r.len_prefixed())?)),
+            Ty::Uuid => Value::String(hex_uuid(self.wire(r.array())?)),
             Ty::Timestamp => {
-                let millis = r.zigzag().map_err(|e| wire(self, e))?;
-                let at = OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000)
-                    .map_err(|_| self.fail(crate::Error::InvalidTimestamp))?;
+                let at = self.wire(OffsetDateTime::decode(r))?;
                 Value::String(at.format(&Rfc3339).map_err(|error| self.fail(error))?)
             }
-            Ty::Option { of } => match r.byte().map_err(|e| wire(self, e))? {
-                0 => Value::Null,
-                1 => self.read(r, of, env)?,
-                byte => return Err(self.fail(crate::Error::InvalidBool(byte))),
+            Ty::Option { of } => match self.wire(bool::decode(r))? {
+                false => Value::Null,
+                true => self.read(r, of, env)?,
             },
             Ty::Seq { of } | Ty::Set { of } => {
-                let count = r.count().map_err(|e| wire(self, e))?;
+                let count = self.wire(r.count())?;
                 Value::Array(self.read_items(r, of, env, count)?)
             }
             Ty::Array { of, len } => Value::Array(self.read_items(r, of, env, *len)?),
@@ -364,7 +337,7 @@ impl<'s> Cursor<'_, 's> {
                 Value::Array(items)
             }
             Ty::Map { key, value } => {
-                let count = r.count().map_err(|e| wire(self, e))?;
+                let count = self.wire(r.count())?;
                 if key.substitute(env) == Ty::Str {
                     let mut entries = Map::new();
                     for _ in 0..count {
@@ -408,12 +381,14 @@ impl<'s> Cursor<'_, 's> {
             Shape::Newtype { ty } => self.read(r, ty, args),
             Shape::Struct { fields } => self.read_fields(r, fields, args),
             Shape::Enum { variants, other, .. } => {
-                let (index, has_payload) = r.tag().map_err(|error| self.fail(error))?;
-                let holds_index = |position: usize| Some(position) == *other && variants[position].payload != Payload::Unit;
-                let position = variant_indexes(variants).enumerate().position(|(position, known)| known == index && !holds_index(position));
+                let (index, has_payload) = self.wire(r.tag())?;
+                let holds_index = |position: usize| Some(position) == *other && variants[position].max_held_index().is_some();
+                let position = variant_indexes(variants.iter().map(|variant| variant.index))
+                    .enumerate()
+                    .position(|(position, known)| known == index && !holds_index(position));
                 let Some(variant) = position.map(|position| &variants[position]) else {
                     if has_payload {
-                        r.skip_frame().map_err(|error| self.fail(error))?;
+                        self.wire(r.skip_frame())?;
                     }
                     return match other.and_then(|other| variants.get(other)) {
                         Some(fallback) if fallback.payload == Payload::Unit => Ok(Value::String(fallback.name.clone())),
@@ -425,7 +400,7 @@ impl<'s> Cursor<'_, 's> {
                     let payload = match (&variant.payload, has_payload) {
                         (Payload::Unit, false) => return Ok(Value::String(variant.name.clone())),
                         (Payload::Newtype { ty }, true) => {
-                            let (mut body, _) = r.frame().map_err(|error| cursor.fail(error))?;
+                            let (mut body, _) = cursor.wire(r.frame())?;
                             cursor.read(&mut body, ty, args)?
                         }
                         (Payload::Fields { fields }, true) => cursor.read_fields(r, fields, args)?,
@@ -439,15 +414,14 @@ impl<'s> Cursor<'_, 's> {
     }
 
     fn read_fields(&mut self, r: &mut Reader<'_>, fields: &Fields, env: &[Ty]) -> Result<Value, Error> {
-        let (mut body, mask) = r.frame().map_err(|error| self.fail(error))?;
-        let slice = fields.as_slice();
+        let (mut body, mask) = self.wire(r.frame())?;
         let mut named = Map::new();
-        let mut items = Vec::with_capacity(slice.len());
-        for (index, (bit, field)) in optional_bits(slice).enumerate() {
+        let mut items = Vec::with_capacity(fields.as_slice().len());
+        for (index, (bit, field)) in fields.optional_bits().enumerate() {
             let segment = if field.name.is_empty() { format!("[{index}]") } else { format!(".{}", field.name) };
             let value = match bit {
                 Some(bit) if mask & (1u64 << bit) == 0 => None,
-                _ if field.default && body.is_empty() => Some(zero_value(&field.ty.substitute(env))),
+                _ if field.default && body.is_empty() => Some(field.ty.substitute(env).zero_value().unwrap_or_default()),
                 _ => Some(self.scoped(segment, |cursor| cursor.read(&mut body, &field.ty, env))?),
             };
             match fields {

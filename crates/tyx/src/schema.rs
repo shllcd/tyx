@@ -1,8 +1,8 @@
+use crate::SeqRef;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use crate::SeqRef;
 use tyx_ir::{Def, Error, Schema, Shape, Ty};
 
 pub trait Type {
@@ -168,25 +168,21 @@ container! {
     BTreeSet<T> => Set,
 }
 
-fn seq(of: Ty) -> Ty {
-    if of == Ty::U8 { Ty::Bytes } else { Ty::Seq { of: Box::new(of) } }
-}
-
 impl<T: Type> Type for Vec<T> {
     fn ty(reg: &mut Registry) -> Ty {
-        seq(T::ty(reg))
+        Ty::seq(T::ty(reg))
     }
 }
 
 impl<T: Type> Type for [T] {
     fn ty(reg: &mut Registry) -> Ty {
-        seq(T::ty(reg))
+        Ty::seq(T::ty(reg))
     }
 }
 
 impl<T: Type> Type for SeqRef<'_, T> {
     fn ty(reg: &mut Registry) -> Ty {
-        seq(T::ty(reg))
+        Ty::seq(T::ty(reg))
     }
 }
 

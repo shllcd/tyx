@@ -55,6 +55,17 @@ impl Fields {
             Self::Named(fields) | Self::Tuple(fields) => fields,
         }
     }
+
+    /// Each field with its presence mask bit, `None` for a required field.
+    pub fn optional_bits(&self) -> impl Iterator<Item = (Option<u32>, &Field)> {
+        self.as_slice().iter().scan(0u32, |next, field| {
+            let bit = field.optional.then(|| {
+                *next += 1;
+                *next - 1
+            });
+            Some((bit, field))
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,10 +89,23 @@ pub struct Variant {
     pub payload: Payload,
 }
 
-/// The wire index of each variant, in declaration order.
-pub fn variant_indexes(variants: &[Variant]) -> impl Iterator<Item = u32> + '_ {
-    variants.iter().scan(0u32, |next, variant| {
-        let index = variant.index.unwrap_or(*next);
+impl Variant {
+    /// The largest unknown index an `other` variant of this shape holds; `None` when it cannot hold one.
+    #[must_use]
+    pub fn max_held_index(&self) -> Option<u32> {
+        match &self.payload {
+            Payload::Newtype { ty: Ty::U8 } => Some(u8::MAX.into()),
+            Payload::Newtype { ty: Ty::U16 } => Some(u16::MAX.into()),
+            Payload::Newtype { ty: Ty::U32 } => Some(u32::MAX),
+            _ => None,
+        }
+    }
+}
+
+/// The wire index of each variant from its pinned index, in declaration order.
+pub fn variant_indexes(pinned: impl IntoIterator<Item = Option<u32>>) -> impl Iterator<Item = u32> {
+    pinned.into_iter().scan(0u32, |next, pinned| {
+        let index = pinned.unwrap_or(*next);
         *next = index.wrapping_add(1);
         Some(index)
     })
@@ -145,14 +169,27 @@ pub enum Ty {
 }
 
 impl Ty {
+    /// A sequence of `of`; a sequence of `u8` is `Bytes`.
     #[must_use]
-    pub fn has_zero_value(&self) -> bool {
-        !matches!(self, Self::Uuid | Self::Timestamp | Self::Array { .. } | Self::Tuple { .. } | Self::Named { .. } | Self::Param { .. })
+    pub fn seq(of: Self) -> Self {
+        if of == Self::U8 { Self::Bytes } else { Self::Seq { of: Box::new(of) } }
     }
 
+    /// The value a missing `default` field decodes to, as JSON; `None` for a type without one.
     #[must_use]
-    pub fn is_unit(&self) -> bool {
-        *self == Self::Unit
+    pub fn zero_value(&self) -> Option<serde_json::Value> {
+        use serde_json::Value;
+        match self {
+            Self::Unit | Self::Option { .. } => Some(Value::Null),
+            Self::Bool => Some(Value::Bool(false)),
+            Self::U8 | Self::U16 | Self::U32 | Self::U64 | Self::I8 | Self::I16 | Self::I32 | Self::I64 => Some(Value::from(0)),
+            Self::F32 | Self::F64 => Some(Value::from(0.0)),
+            Self::Str | Self::Bytes => Some(Value::String(String::new())),
+            Self::Seq { .. } | Self::Set { .. } => Some(Value::Array(Vec::new())),
+            Self::Map { key, .. } if **key == Self::Str => Some(Value::Object(serde_json::Map::new())),
+            Self::Map { .. } => Some(Value::Array(Vec::new())),
+            Self::Uuid | Self::Timestamp | Self::Array { .. } | Self::Tuple { .. } | Self::Named { .. } | Self::Param { .. } => None,
+        }
     }
 
     /// Replaces `Param { index }` with `env[index]`; parameters without an argument stay as they are.
@@ -170,35 +207,6 @@ impl Ty {
             _ => self.clone(),
         }
     }
-}
-
-/// Splits a Rust identifier into lowercase words: `HttpServer` and `http_server` both give `["http", "server"]`.
-#[must_use]
-pub fn words(ident: &str) -> Vec<String> {
-    let chars: Vec<char> = ident.chars().collect();
-    let mut words = Vec::new();
-    let mut current = String::new();
-    for (index, &ch) in chars.iter().enumerate() {
-        let previous = index.checked_sub(1).map(|i| chars[i]);
-        let next = chars.get(index + 1).copied();
-        let starts_word = ch.is_uppercase()
-            && previous
-                .is_some_and(|p| p.is_lowercase() || p.is_ascii_digit() || (p.is_uppercase() && next.is_some_and(char::is_lowercase)));
-        if ch == '_' {
-            if !current.is_empty() {
-                words.push(std::mem::take(&mut current));
-            }
-            continue;
-        }
-        if starts_word && !current.is_empty() {
-            words.push(std::mem::take(&mut current));
-        }
-        current.extend(ch.to_lowercase());
-    }
-    if !current.is_empty() {
-        words.push(current);
-    }
-    words
 }
 
 /// Rust-like notation, the inverse of [`Ty::from_str`]: `Vec<Option<str>>`, `Map<str, u32>`, `[u8; 4]`, `Page<Book>`.
@@ -341,7 +349,7 @@ impl TyParser<'_> {
         if self.eat('[') {
             let of = Box::new(self.ty()?);
             if self.eat(']') {
-                return Ok(if *of == Ty::U8 { Ty::Bytes } else { Ty::Seq { of } });
+                return Ok(Ty::seq(*of));
             }
             self.expect(';')?;
             let len = self.word()?.parse().map_err(|_| self.error("expected an array length"))?;
@@ -375,10 +383,7 @@ impl TyParser<'_> {
             "OffsetDateTime" => Ty::Timestamp,
             "Box" | "Arc" | "Rc" => *one(&mut args, self)?,
             "Option" => Ty::Option { of: one(&mut args, self)? },
-            "Vec" => match one(&mut args, self)? {
-                of if *of == Ty::U8 => Ty::Bytes,
-                of => Ty::Seq { of },
-            },
+            "Vec" => Ty::seq(*one(&mut args, self)?),
             "Set" | "HashSet" | "BTreeSet" => Ty::Set { of: one(&mut args, self)? },
             "Map" | "HashMap" | "BTreeMap" => match <[Ty; 2]>::try_from(args) {
                 Ok([key, value]) => Ty::Map { key: Box::new(key), value: Box::new(value) },
@@ -455,13 +460,14 @@ impl Schema {
                 Shape::Newtype { ty } => check(ty)?,
                 Shape::Struct { fields } => check_fields(def, fields, &mut check)?,
                 Shape::Enum { variants, other, .. } => {
-                    let mut indexes: Vec<u32> = variant_indexes(variants).collect();
+                    let mut indexes: Vec<u32> = variant_indexes(variants.iter().map(|variant| variant.index)).collect();
                     indexes.sort_unstable();
                     if let Some(pair) = indexes.windows(2).find(|pair| pair[0] == pair[1]) {
                         return Err(Error::DuplicateVariantIndex { ty: def.name.clone(), index: pair[0] });
                     }
                     if let Some(other) = other.and_then(|other| variants.get(other))
-                        && !matches!(&other.payload, Payload::Unit | Payload::Newtype { ty: Ty::U8 | Ty::U16 | Ty::U32 })
+                        && other.payload != Payload::Unit
+                        && other.max_held_index().is_none()
                     {
                         return Err(Error::InvalidOther { ty: def.name.clone() });
                     }
@@ -497,20 +503,6 @@ impl Schema {
         }
     }
 
-    /// The fields of a struct with named fields, type arguments substituted.
-    #[must_use]
-    pub fn named_fields(&self, ty: &Ty) -> Option<Vec<Field>> {
-        let Ty::Named { name, args } = ty else {
-            return None;
-        };
-        match &self.def(name)?.shape {
-            Shape::Struct { fields: Fields::Named(fields) } => {
-                Some(fields.iter().map(|field| Field { ty: field.ty.substitute(args), ..field.clone() }).collect())
-            }
-            _ => None,
-        }
-    }
-
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
@@ -525,7 +517,7 @@ fn check_fields(def: &Def, fields: &Fields, check: &mut impl FnMut(&Ty) -> Resul
         return Err(Error::TooManyOptional { ty: def.name.clone() });
     }
     for field in fields.as_slice() {
-        if field.default && !field.optional && !field.ty.has_zero_value() {
+        if field.default && !field.optional && field.ty.zero_value().is_none() {
             return Err(Error::DefaultWithoutZero { ty: def.name.clone(), field: field.name.clone() });
         }
         check(&field.ty)?;

@@ -104,8 +104,8 @@ impl<'s> Compat<'s> {
                 if ao != bo && ao.is_some() {
                     self.fail(path, "moved or dropped its `other` variant");
                 }
-                let after_indexes: Vec<u32> = variant_indexes(b).collect();
-                let before_indexes: Vec<u32> = variant_indexes(a).collect();
+                let after_indexes: Vec<u32> = variant_indexes(b.iter().map(|variant| variant.index)).collect();
+                let before_indexes: Vec<u32> = variant_indexes(a.iter().map(|variant| variant.index)).collect();
                 for (index, before) in before_indexes.iter().zip(a) {
                     let at = format!("{path}::{}", before.name);
                     let Some(after) = after_indexes.iter().position(|after| after == index).map(|position| &b[position]) else {
