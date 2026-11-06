@@ -191,7 +191,7 @@ pub fn post_access(post: &Post) {
 
     let tyx = tyx::to_vec(post);
     let postcard = postcard::to_allocvec(post).expect("postcard");
-    let bincode = bincode::serde::encode_to_vec(post, bincode::config::standard()).expect("bincode");
+    let bincode = bincode::serde::encode_to_vec(post, formats::bincode_config()).expect("bincode");
     let rkyv = post.rkyv_encode(Vec::new());
     let mut fbb = flatbuffers::FlatBufferBuilder::new();
     flat::Flat::fb_build(post, &mut fbb);
@@ -207,7 +207,7 @@ pub fn post_access(post: &Post) {
         postcard::from_bytes(b).expect("postcard")
     }
     fn bincode_ref(b: &[u8]) -> PostRef<'_> {
-        bincode::serde::borrow_decode_from_slice(b, bincode::config::standard()).expect("bincode").0
+        bincode::serde::borrow_decode_from_slice(b, formats::bincode_config()).expect("bincode").0
     }
     fn rkyv_checked(b: &[u8]) -> &ArchivedPost {
         rkyv::access::<ArchivedPost, rkyv::rancor::Error>(b).expect("rkyv")
@@ -469,7 +469,7 @@ fn probe<E: std::fmt::Display>(bytes: Vec<u8>, dec: impl Fn(&[u8]) -> Result<Pos
 pub fn evolution(post: &Post) {
     let v2 = PostV2::from_v1(post);
     let v1_post = post;
-    let bc = bincode::config::standard();
+    let bc = formats::bincode_config();
     let probes = [
         ("tyx", probe(tyx::to_vec(&v2), |b| tyx::from_slice::<Post>(b), v1_post)),
         ("protobuf (prost)", {

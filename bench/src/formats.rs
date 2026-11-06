@@ -56,7 +56,7 @@ pub trait Visit<T> {
     fn borrowed(&mut self, dec: impl Fn(&[u8]), reencode: impl Fn(&[u8]) -> Vec<u8>);
 }
 
-fn bincode_config() -> bincode::config::Configuration {
+pub fn bincode_config() -> bincode::config::Configuration {
     bincode::config::standard()
 }
 
