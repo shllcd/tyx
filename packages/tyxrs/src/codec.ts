@@ -312,6 +312,7 @@ function formatTimestamp(millis: number): string {
   if (!(millis >= MIN_TIMESTAMP_MILLIS && millis <= MAX_TIMESTAMP_MILLIS)) throw new TyxError("timestamp out of range");
   const days = Math.floor(millis / MILLIS_PER_DAY);
   const millisOfDay = millis - days * MILLIS_PER_DAY;
+
   const shifted = days + 719_468;
   const era = Math.floor(shifted / 146_097);
   const dayOfEra = shifted - era * 146_097;
@@ -321,6 +322,7 @@ function formatTimestamp(millis: number): string {
   const day = dayOfYear - Math.floor((153 * monthFromMarch + 2) / 5) + 1;
   const month = monthFromMarch < 10 ? monthFromMarch + 3 : monthFromMarch - 9;
   const year = yearOfEra + era * 400 + (month <= 2 ? 1 : 0);
+
   const seconds = Math.floor(millisOfDay / 1000);
   const fraction = millisOfDay - seconds * 1000;
   const text = `${pad4(year)}-${pad2(month)}-${pad2(day)}T${pad2(Math.floor(seconds / 3600))}:${pad2(Math.floor(seconds / 60) % 60)}:${pad2(seconds % 60)}`;
@@ -831,6 +833,7 @@ class Compiler {
       const raw = r.tagRaw();
       const index = Math.floor(raw / 2);
       const hasPayload = raw % 2 === 1;
+
       const found = positions.get(index);
       if (found === undefined) {
         if (hasPayload) r.skipFrame();
@@ -1017,6 +1020,14 @@ function writeJson(w: Writer, value: unknown, depthLeft: number): void {
   }
 }
 
+function setOwnMember(members: Record<string, unknown>, name: string, member: unknown): void {
+  if (name === "__proto__") {
+    Object.defineProperty(members, name, { value: member, writable: true, enumerable: true, configurable: true });
+  } else {
+    members[name] = member;
+  }
+}
+
 function readJson(r: Reader, depthLeft: number): unknown {
   const tag = r.byte();
   switch (tag) {
@@ -1054,12 +1065,7 @@ function readJson(r: Reader, depthLeft: number): unknown {
       for (let index = 0; index < count; index++) {
         const name = r.str();
         try {
-          const member = readJson(r, depthLeft - 1);
-          if (name === "__proto__") {
-            Object.defineProperty(members, name, { value: member, writable: true, enumerable: true, configurable: true });
-          } else {
-            members[name] = member;
-          }
+          setOwnMember(members, name, readJson(r, depthLeft - 1));
         } catch (error) {
           throw within(error, `.${name}`);
         }

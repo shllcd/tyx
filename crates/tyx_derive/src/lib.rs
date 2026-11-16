@@ -1,9 +1,10 @@
 use proc_macro2::{Span, TokenStream};
-use quote::{format_ident, quote};
+use quote::{ToTokens, format_ident, quote};
 use syn::ext::IdentExt;
+use syn::meta::ParseNestedMeta;
 use syn::visit_mut::VisitMut;
 use syn::{
-    Attribute, Data, DeriveInput, Fields, GenericArgument, GenericParam, Generics, Ident, LitStr, Member, PathArguments, Type,
+    Attribute, Data, DataEnum, DeriveInput, Fields, GenericArgument, GenericParam, Generics, Ident, LitStr, Member, PathArguments, Type,
     parse_macro_input, parse_quote,
 };
 use tyx_ir::{MAX_OPTIONAL_FIELDS, variant_indexes};
@@ -95,52 +96,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     if let Some(param) = input.generics.const_params().next() {
         return Err(syn::Error::new_spanned(param, "#[derive(Type)] does not support const generics"));
     }
-    let body = match &input.data {
-        Data::Struct(data) => match &data.fields {
-            Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => {
-                let field = &unnamed.unnamed[0];
-                reject_field_attrs(&field.attrs)?;
-                Body::Newtype(Box::new(field.ty.clone()))
-            }
-            fields => Body::Struct(field_set(fields)?),
-        },
-        Data::Enum(data) => {
-            let pinned = data
-                .variants
-                .iter()
-                .map(|variant| variant.discriminant.as_ref().map(|(_, expr)| pinned_index(expr)).transpose())
-                .collect::<syn::Result<Vec<_>>>()?;
-            let mut variants = Vec::with_capacity(data.variants.len());
-            for ((variant, pinned), index) in data.variants.iter().zip(&pinned).zip(variant_indexes(pinned.iter().copied())) {
-                let is_other = variant_is_other(&variant.attrs)?;
-                let kind = match &variant.fields {
-                    Fields::Unit => VariantKind::Unit,
-                    Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => {
-                        reject_field_attrs(&unnamed.unnamed[0].attrs)?;
-                        VariantKind::Newtype(Box::new(unnamed.unnamed[0].ty.clone()))
-                    }
-                    fields => VariantKind::Fields(field_set(fields)?),
-                };
-                if is_other && matches!(kind, VariantKind::Fields(_)) {
-                    return Err(syn::Error::new_spanned(variant, "#[tyx(other)] requires a unit variant or one holding the index"));
-                }
-                variants.push(VariantInfo { ident: variant.ident.clone(), kind, is_other, index, pinned: *pinned });
-            }
-            for (position, variant) in variants.iter().enumerate() {
-                if variants[..position].iter().any(|earlier| earlier.index == variant.index) {
-                    return Err(syn::Error::new_spanned(
-                        &data.variants[position],
-                        format!("variant index {} is already used", variant.index),
-                    ));
-                }
-            }
-            if variants.iter().filter(|variant| variant.is_other).count() > 1 {
-                return Err(syn::Error::new_spanned(&input.ident, "only one variant may be #[tyx(other)]"));
-            }
-            Body::Enum(variants)
-        }
-        Data::Union(data) => return Err(syn::Error::new_spanned(data.union_token, "#[derive(Type)] does not support unions")),
-    };
+    let body = body(input)?;
     if attrs.is_screaming_snake_case && !matches!(body, Body::Enum(_)) {
         return Err(syn::Error::new_spanned(&input.ident, "#[tyx(rename_all)] renames enum variants"));
     }
@@ -161,31 +117,91 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     })
 }
 
+fn body(input: &DeriveInput) -> syn::Result<Body> {
+    match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => {
+                let field = &unnamed.unnamed[0];
+                reject_field_attrs(&field.attrs)?;
+                Ok(Body::Newtype(Box::new(field.ty.clone())))
+            }
+            fields => Ok(Body::Struct(field_set(fields)?)),
+        },
+        Data::Enum(data) => Ok(Body::Enum(variants(&input.ident, data)?)),
+        Data::Union(data) => Err(syn::Error::new_spanned(data.union_token, "#[derive(Type)] does not support unions")),
+    }
+}
+
+fn variants(ident: &Ident, data: &DataEnum) -> syn::Result<Vec<VariantInfo>> {
+    let discriminants = data.variants.iter().map(|variant| variant.discriminant.as_ref());
+    let pinned = discriminants.map(|pinned| pinned.map(|(_, expr)| pinned_index(expr)).transpose()).collect::<syn::Result<Vec<_>>>()?;
+
+    let mut variants = Vec::with_capacity(data.variants.len());
+    for ((variant, pinned), index) in data.variants.iter().zip(&pinned).zip(variant_indexes(pinned.iter().copied())) {
+        let is_other = variant_is_other(&variant.attrs)?;
+        let kind = variant_kind(&variant.fields)?;
+        if is_other && matches!(kind, VariantKind::Fields(_)) {
+            return Err(syn::Error::new_spanned(variant, "#[tyx(other)] requires a unit variant or one holding the index"));
+        }
+        variants.push(VariantInfo { ident: variant.ident.clone(), kind, is_other, index, pinned: *pinned });
+    }
+
+    for (position, variant) in variants.iter().enumerate() {
+        let is_repeated = variants[..position].iter().any(|earlier| earlier.index == variant.index);
+        if is_repeated {
+            let message = format!("variant index {} is already used", variant.index);
+            return Err(syn::Error::new_spanned(&data.variants[position], message));
+        }
+    }
+    if variants.iter().filter(|variant| variant.is_other).count() > 1 {
+        return Err(syn::Error::new_spanned(ident, "only one variant may be #[tyx(other)]"));
+    }
+    Ok(variants)
+}
+
+fn variant_kind(fields: &Fields) -> syn::Result<VariantKind> {
+    match fields {
+        Fields::Unit => Ok(VariantKind::Unit),
+        Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => {
+            reject_field_attrs(&unnamed.unnamed[0].attrs)?;
+            Ok(VariantKind::Newtype(Box::new(unnamed.unnamed[0].ty.clone())))
+        }
+        fields => Ok(VariantKind::Fields(field_set(fields)?)),
+    }
+}
+
 fn container_attrs(attrs: &[Attribute]) -> syn::Result<ContainerAttrs> {
     let mut parsed = ContainerAttrs::default();
     for attr in attrs.iter().filter(|attr| attr.path().is_ident("tyx")) {
-        attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("name") {
-                parsed.name = Some(meta.value()?.parse::<LitStr>()?.value());
-            } else if meta.path.is_ident("tag") {
-                parsed.tag = Some(meta.value()?.parse::<LitStr>()?.value());
-            } else if meta.path.is_ident("crate") {
-                parsed.krate = Some(meta.value()?.parse()?);
-            } else if meta.path.is_ident("encode_only") {
-                parsed.encode_only = true;
-            } else if meta.path.is_ident("rename_all") {
-                let case = meta.value()?.parse::<LitStr>()?;
-                if case.value() != "SCREAMING_SNAKE_CASE" {
-                    return Err(syn::Error::new_spanned(case, "the only supported case is `SCREAMING_SNAKE_CASE`"));
-                }
-                parsed.is_screaming_snake_case = true;
-            } else {
-                return Err(meta.error("expected `name`, `tag`, `crate`, `encode_only` or `rename_all`"));
-            }
-            Ok(())
-        })?;
+        attr.parse_nested_meta(|meta| container_attr(&mut parsed, &meta))?;
     }
     Ok(parsed)
+}
+
+fn container_attr(parsed: &mut ContainerAttrs, meta: &ParseNestedMeta<'_>) -> syn::Result<()> {
+    if meta.path.is_ident("name") {
+        parsed.name = Some(meta.value()?.parse::<LitStr>()?.value());
+    } else if meta.path.is_ident("tag") {
+        parsed.tag = Some(meta.value()?.parse::<LitStr>()?.value());
+    } else if meta.path.is_ident("crate") {
+        parsed.krate = Some(meta.value()?.parse()?);
+    } else if meta.path.is_ident("encode_only") {
+        parsed.encode_only = true;
+    } else if meta.path.is_ident("rename_all") {
+        require_screaming_snake_case(&meta.value()?.parse()?)?;
+        parsed.is_screaming_snake_case = true;
+    } else {
+        return Err(meta.error("expected `name`, `tag`, `crate`, `encode_only` or `rename_all`"));
+    }
+    Ok(())
+}
+
+fn require_screaming_snake_case(case: &LitStr) -> syn::Result<()> {
+    if case.value() == "SCREAMING_SNAKE_CASE" {
+        Ok(())
+    } else {
+        Err(syn::Error::new_spanned(case, "the only supported case is `SCREAMING_SNAKE_CASE`"))
+    }
 }
 
 fn screaming_snake_case(name: &str) -> String {
@@ -319,65 +335,71 @@ fn with_bound(generics: &Generics, bound: &TokenStream) -> Generics {
     generics
 }
 
+fn quote_option(value: Option<impl ToTokens>) -> TokenStream {
+    match value {
+        Some(value) => quote!(::std::option::Option::Some(#value)),
+        None => quote!(::std::option::Option::None),
+    }
+}
+
+fn describe(params: &[Ident], ty: &Type) -> TokenStream {
+    let mut ty = ty.clone();
+    SubstituteParams(params).visit_type_mut(&mut ty);
+    quote!(<#ty as __tyx::Type>::ty(reg))
+}
+
+fn describe_field(params: &[Ident], field: &FieldInfo) -> TokenStream {
+    let name = &field.name;
+    let ty = describe(params, field.wire_ty());
+    let optional = field.optional_inner.is_some();
+    let default = field.attrs.default;
+
+    quote!(__tyx::ir::Field { name: #name.to_owned(), ty: #ty, optional: #optional, default: #default })
+}
+
+fn describe_fields(params: &[Ident], set: &FieldSet) -> TokenStream {
+    let fields = set.wired().map(|field| describe_field(params, field));
+    let style = if set.is_named { quote!(Named) } else { quote!(Tuple) };
+    quote!(__tyx::ir::Fields::#style(::std::vec![#(#fields),*]))
+}
+
+fn describe_variant(params: &[Ident], attrs: &ContainerAttrs, variant: &VariantInfo) -> TokenStream {
+    let name = variant.ident.unraw().to_string();
+    let name = if attrs.is_screaming_snake_case { screaming_snake_case(&name) } else { name };
+    let payload = match &variant.kind {
+        VariantKind::Unit => quote!(__tyx::ir::Payload::Unit),
+        VariantKind::Newtype(ty) => {
+            let ty = describe(params, ty);
+            quote!(__tyx::ir::Payload::Newtype { ty: #ty })
+        }
+        VariantKind::Fields(set) => {
+            let fields = describe_fields(params, set);
+            quote!(__tyx::ir::Payload::Fields { fields: #fields })
+        }
+    };
+    let index = quote_option(variant.pinned);
+
+    quote!(__tyx::ir::Variant { name: #name.to_owned(), index: #index, payload: #payload })
+}
+
 fn expand_type(input: &DeriveInput, attrs: &ContainerAttrs, name: &str, body: &Body) -> TokenStream {
     let ident = &input.ident;
     let params = type_param_names(&input.generics);
     let generics = with_bound(&input.generics, &quote!(__tyx::Type));
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let describe = |ty: &Type| {
-        let mut ty = ty.clone();
-        SubstituteParams(&params).visit_type_mut(&mut ty);
-        quote!(<#ty as __tyx::Type>::ty(reg))
-    };
-    let describe_fields = |set: &FieldSet| {
-        let fields = set.wired().map(|field| {
-            let name = &field.name;
-            let ty = describe(field.wire_ty());
-            let optional = field.optional_inner.is_some();
-            let default = field.attrs.default;
-            quote!(__tyx::ir::Field { name: #name.to_owned(), ty: #ty, optional: #optional, default: #default })
-        });
-        let style = if set.is_named { quote!(Named) } else { quote!(Tuple) };
-        quote!(__tyx::ir::Fields::#style(::std::vec![#(#fields),*]))
-    };
     let shape = match body {
         Body::Newtype(ty) => {
-            let ty = describe(ty);
+            let ty = describe(&params, ty);
             quote!(__tyx::ir::Shape::Newtype { ty: #ty })
         }
         Body::Struct(set) => {
-            let fields = describe_fields(set);
+            let fields = describe_fields(&params, set);
             quote!(__tyx::ir::Shape::Struct { fields: #fields })
         }
         Body::Enum(variants) => {
-            let entries = variants.iter().map(|variant| {
-                let name = variant.ident.unraw().to_string();
-                let name = if attrs.is_screaming_snake_case { screaming_snake_case(&name) } else { name };
-                let payload = match &variant.kind {
-                    VariantKind::Unit => quote!(__tyx::ir::Payload::Unit),
-                    VariantKind::Newtype(ty) => {
-                        let ty = describe(ty);
-                        quote!(__tyx::ir::Payload::Newtype { ty: #ty })
-                    }
-                    VariantKind::Fields(set) => {
-                        let fields = describe_fields(set);
-                        quote!(__tyx::ir::Payload::Fields { fields: #fields })
-                    }
-                };
-                let index = match variant.pinned {
-                    Some(index) => quote!(::std::option::Option::Some(#index)),
-                    None => quote!(::std::option::Option::None),
-                };
-                quote!(__tyx::ir::Variant { name: #name.to_owned(), index: #index, payload: #payload })
-            });
-            let tag = match &attrs.tag {
-                Some(tag) => quote!(::std::option::Option::Some(#tag.to_owned())),
-                None => quote!(::std::option::Option::None),
-            };
-            let other = match variants.iter().position(|variant| variant.is_other) {
-                Some(index) => quote!(::std::option::Option::Some(#index)),
-                None => quote!(::std::option::Option::None),
-            };
+            let entries = variants.iter().map(|variant| describe_variant(&params, attrs, variant));
+            let tag = quote_option(attrs.tag.as_ref().map(|tag| quote!(#tag.to_owned())));
+            let other = quote_option(variants.iter().position(|variant| variant.is_other));
             quote!(__tyx::ir::Shape::Enum { variants: ::std::vec![#(#entries),*], tag: #tag, other: #other })
         }
     };
@@ -431,6 +453,28 @@ fn encode_fields(set: &FieldSet) -> TokenStream {
     }
 }
 
+fn encode_arm(variant: &VariantInfo) -> TokenStream {
+    let variant_ident = &variant.ident;
+    let index = variant.index;
+    match &variant.kind {
+        _ if variant.holds_index() => quote!(Self::#variant_ident(index) => w.tag(u32::from(*index), false),),
+        VariantKind::Unit => quote!(Self::#variant_ident => w.tag(#index, false),),
+        VariantKind::Newtype(_) => quote! {
+            Self::#variant_ident(value) => {
+                w.tag(#index, true);
+                let frame = w.begin(0);
+                __tyx::Encode::encode(value, w);
+                w.end(frame);
+            }
+        },
+        VariantKind::Fields(set) => {
+            let pattern = destructure(&quote!(Self::#variant_ident), set);
+            let fields = encode_fields(set);
+            quote!(#pattern => { w.tag(#index, true); #fields })
+        }
+    }
+}
+
 fn expand_encode(input: &DeriveInput, body: &Body) -> TokenStream {
     let ident = &input.ident;
     let generics = with_bound(&input.generics, &quote!(__tyx::Encode));
@@ -447,32 +491,7 @@ fn expand_encode(input: &DeriveInput, body: &Body) -> TokenStream {
         }
         Body::Enum(variants) if variants.is_empty() => quote!(match *self {}),
         Body::Enum(variants) => {
-            let arms = variants.iter().map(|variant| {
-                let variant_ident = &variant.ident;
-                let index = variant.index;
-                match &variant.kind {
-                    _ if variant.holds_index() => quote!(Self::#variant_ident(index) => w.tag(u32::from(*index), false),),
-                    VariantKind::Unit => quote!(Self::#variant_ident => w.tag(#index, false),),
-                    VariantKind::Newtype(_) => quote! {
-                        Self::#variant_ident(value) => {
-                            w.tag(#index, true);
-                            let frame = w.begin(0);
-                            __tyx::Encode::encode(value, w);
-                            w.end(frame);
-                        }
-                    },
-                    VariantKind::Fields(set) => {
-                        let pattern = destructure(&quote!(Self::#variant_ident), set);
-                        let fields = encode_fields(set);
-                        quote! {
-                            #pattern => {
-                                w.tag(#index, true);
-                                #fields
-                            }
-                        }
-                    }
-                }
-            });
+            let arms = variants.iter().map(encode_arm);
             quote!(match self { #(#arms)* })
         }
     };
@@ -486,29 +505,98 @@ fn expand_encode(input: &DeriveInput, body: &Body) -> TokenStream {
     }
 }
 
+fn decode_field(set: &FieldSet, field: &FieldInfo, known_optional: u32) -> TokenStream {
+    if field.attrs.unknown {
+        let ty = &field.ty;
+        return quote!(<#ty>::rest(r, mask, #known_optional)?);
+    }
+    if field.attrs.skip {
+        return quote!(::std::default::Default::default());
+    }
+
+    let bit = set.optional_bits().find(|(_, optional)| optional.member == field.member).map(|(bit, _)| bit);
+    if let Some(bit) = bit {
+        return quote! {
+            if mask & (1u64 << #bit) != 0 {
+                ::std::option::Option::Some(__tyx::Decode::decode(r)?)
+            } else {
+                ::std::option::Option::None
+            }
+        };
+    }
+    if field.attrs.default {
+        return quote!(if r.is_empty() { ::std::default::Default::default() } else { __tyx::Decode::decode(r)? });
+    }
+    quote!(__tyx::Decode::decode(r)?)
+}
+
+fn decode_arm(name: &str, variant: &VariantInfo) -> TokenStream {
+    let variant_ident = &variant.ident;
+    let index = variant.index;
+    let missing_payload = quote! {
+        (#index, false) => ::std::result::Result::Err(__tyx::Error::MissingPayload { ty: #name, index: #index }),
+    };
+    match &variant.kind {
+        VariantKind::Unit => quote! {
+            (#index, false) => ::std::result::Result::Ok(Self::#variant_ident),
+            (#index, true) => ::std::result::Result::Err(__tyx::Error::UnexpectedPayload { ty: #name, index: #index }),
+        },
+        VariantKind::Newtype(_) => quote! {
+            (#index, true) => {
+                let (mut body, _) = r.frame()?;
+                ::std::result::Result::Ok(Self::#variant_ident(__tyx::Decode::decode(&mut body)?))
+            }
+            #missing_payload
+        },
+        VariantKind::Fields(set) => {
+            let fields = decode_fields(&quote!(Self::#variant_ident), set);
+            quote! {
+                (#index, true) => { #fields }
+                #missing_payload
+            }
+        }
+    }
+}
+
+fn decode_fallback(name: &str, variants: &[VariantInfo]) -> TokenStream {
+    let Some(other) = variants.iter().find(|variant| variant.is_other) else {
+        return quote!(::std::result::Result::Err(__tyx::Error::UnknownVariant { ty: #name, index }));
+    };
+    let variant_ident = &other.ident;
+    if other.holds_index() {
+        quote! {
+            ::std::convert::TryFrom::try_from(index)
+                .map(Self::#variant_ident)
+                .map_err(|_| __tyx::Error::UnknownVariant { ty: #name, index })
+        }
+    } else {
+        quote!(::std::result::Result::Ok(Self::#variant_ident))
+    }
+}
+
+fn decode_enum(name: &str, variants: &[VariantInfo]) -> TokenStream {
+    let arms = variants.iter().filter(|variant| !variant.holds_index()).map(|variant| decode_arm(name, variant));
+    let skip_payload = quote!(if has_payload {
+        r.skip_frame()?;
+    });
+    let fallback = decode_fallback(name, variants);
+    quote! {
+        match r.tag()? {
+            #(#arms)*
+            (index, has_payload) => {
+                #skip_payload
+                #fallback
+            }
+        }
+    }
+}
+
 fn decode_fields(path: &TokenStream, set: &FieldSet) -> TokenStream {
     let known_optional = set.optional_bits().count() as u32;
     let mask = if known_optional > 0 || set.unknown().is_some() { quote!(mask) } else { quote!(_) };
     let inits = set.fields.iter().map(|field| {
         let member = &field.member;
-        let value = if field.attrs.unknown {
-            let ty = &field.ty;
-            quote!(<#ty>::rest(r, mask, #known_optional)?)
-        } else if field.attrs.skip {
-            quote!(::std::default::Default::default())
-        } else if let Some(bit) = set.optional_bits().find(|(_, optional)| optional.member == field.member).map(|(bit, _)| bit) {
-            quote! {
-                if mask & (1u64 << #bit) != 0 {
-                    ::std::option::Option::Some(__tyx::Decode::decode(r)?)
-                } else {
-                    ::std::option::Option::None
-                }
-            }
-        } else if field.attrs.default {
-            quote!(if r.is_empty() { ::std::default::Default::default() } else { __tyx::Decode::decode(r)? })
-        } else {
-            quote!(__tyx::Decode::decode(r)?)
-        };
+        let value = decode_field(set, field, known_optional);
         quote!(#member: #value)
     });
     quote! {
@@ -551,58 +639,7 @@ fn expand_decode(input: &DeriveInput, name: &str, body: &Body) -> TokenStream {
     let decode = match body {
         Body::Newtype(_) => quote!(::std::result::Result::Ok(Self(__tyx::Decode::decode(r)?))),
         Body::Struct(set) => decode_fields(&quote!(Self), set),
-        Body::Enum(variants) => {
-            let arms = variants.iter().filter(|variant| !variant.holds_index()).map(|variant| {
-                let variant_ident = &variant.ident;
-                let index = variant.index;
-                match &variant.kind {
-                    VariantKind::Unit => quote! {
-                        (#index, false) => ::std::result::Result::Ok(Self::#variant_ident),
-                        (#index, true) => ::std::result::Result::Err(__tyx::Error::UnexpectedPayload { ty: #name, index: #index }),
-                    },
-                    VariantKind::Newtype(_) => quote! {
-                        (#index, true) => {
-                            let (mut body, _) = r.frame()?;
-                            ::std::result::Result::Ok(Self::#variant_ident(__tyx::Decode::decode(&mut body)?))
-                        }
-                        (#index, false) => ::std::result::Result::Err(__tyx::Error::MissingPayload { ty: #name, index: #index }),
-                    },
-                    VariantKind::Fields(set) => {
-                        let fields = decode_fields(&quote!(Self::#variant_ident), set);
-                        quote! {
-                            (#index, true) => { #fields }
-                            (#index, false) => ::std::result::Result::Err(__tyx::Error::MissingPayload { ty: #name, index: #index }),
-                        }
-                    }
-                }
-            });
-            let fallback = match variants.iter().find(|variant| variant.is_other) {
-                Some(variant) if variant.holds_index() => {
-                    let variant_ident = &variant.ident;
-                    quote! {
-                        ::std::convert::TryFrom::try_from(index)
-                            .map(Self::#variant_ident)
-                            .map_err(|_| __tyx::Error::UnknownVariant { ty: #name, index })
-                    }
-                }
-                Some(variant) => {
-                    let variant_ident = &variant.ident;
-                    quote!(::std::result::Result::Ok(Self::#variant_ident))
-                }
-                None => quote!(::std::result::Result::Err(__tyx::Error::UnknownVariant { ty: #name, index })),
-            };
-            quote! {
-                match r.tag()? {
-                    #(#arms)*
-                    (index, has_payload) => {
-                        if has_payload {
-                            r.skip_frame()?;
-                        }
-                        #fallback
-                    }
-                }
-            }
-        }
+        Body::Enum(variants) => decode_enum(name, variants),
     };
     quote! {
         #[allow(private_bounds)]

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use crate::{Def, Field, Fields, Payload, Schema, Shape, Ty, variant_indexes};
+use crate::{Def, Field, Fields, Payload, Schema, Shape, Ty, Variant, variant_indexes};
 
 /// A change from a frozen schema that an old peer cannot survive.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,67 +71,82 @@ impl<'s> Compat<'s> {
                 }
                 self.ty(path, a, b);
             }
-            (Ty::Tuple { of: a }, Ty::Tuple { of: b }) => {
-                if a.len() != b.len() {
-                    self.fail(path, format!("tuple length changed from {} to {}", a.len(), b.len()));
-                }
-                for (index, (a, b)) in a.iter().zip(b).enumerate() {
-                    self.ty(&format!("{path}.{index}"), a, b);
-                }
-            }
+            (Ty::Tuple { of: a }, Ty::Tuple { of: b }) => self.tuple(path, a, b),
             (Ty::Named { name: an, args: aa }, Ty::Named { name: bn, args: ba }) => {
-                if !self.seen.insert((old.to_string(), new.to_string())) {
-                    return;
+                let is_first_visit = self.seen.insert((old.to_string(), new.to_string()));
+                if is_first_visit {
+                    self.named(path, an, aa, bn, ba);
                 }
-                let (Some(a), Some(b)) = (self.old.def(an), self.new.def(bn)) else {
-                    self.fail(path, format!("refers to an undefined type `{an}` or `{bn}`"));
-                    return;
-                };
-                self.def(&format!("{path} {bn}"), a, aa, b, ba);
             }
             _ if old == new => {}
             _ => self.fail(path, format!("retyped from `{old}` to `{new}`")),
         }
     }
 
+    fn tuple(&mut self, path: &str, old: &[Ty], new: &[Ty]) {
+        if old.len() != new.len() {
+            self.fail(path, format!("tuple length changed from {} to {}", old.len(), new.len()));
+        }
+        for (index, (a, b)) in old.iter().zip(new).enumerate() {
+            self.ty(&format!("{path}.{index}"), a, b);
+        }
+    }
+
+    fn named(&mut self, path: &str, old_name: &str, old_args: &[Ty], new_name: &str, new_args: &[Ty]) {
+        let (Some(old), Some(new)) = (self.old.def(old_name), self.new.def(new_name)) else {
+            self.fail(path, format!("refers to an undefined type `{old_name}` or `{new_name}`"));
+            return;
+        };
+        self.def(&format!("{path} {new_name}"), old, old_args, new, new_args);
+    }
+
     fn def(&mut self, path: &str, old: &Def, old_args: &[Ty], new: &Def, new_args: &[Ty]) {
         match (&old.shape, &new.shape) {
             (Shape::Struct { fields: a }, Shape::Struct { fields: b }) => self.fields(path, a, old_args, b, new_args),
             (Shape::Enum { variants: a, tag: at, other: ao }, Shape::Enum { variants: b, tag: bt, other: bo }) => {
-                if at != bt {
-                    self.fail(path, format!("JSON tag changed from {at:?} to {bt:?}"));
-                }
-                if ao != bo && ao.is_some() {
-                    self.fail(path, "moved or dropped its `other` variant");
-                }
-                let after_indexes: Vec<u32> = variant_indexes(b.iter().map(|variant| variant.index)).collect();
-                let before_indexes: Vec<u32> = variant_indexes(a.iter().map(|variant| variant.index)).collect();
-                for (index, before) in before_indexes.iter().zip(a) {
-                    let at = format!("{path}::{}", before.name);
-                    let Some(after) = after_indexes.iter().position(|after| after == index).map(|position| &b[position]) else {
-                        self.fail(&at, "removed");
-                        continue;
-                    };
-                    if after.name != before.name {
-                        self.fail(&at, format!("renamed or reordered to `{}`", after.name));
-                    }
-                    match (&before.payload, &after.payload) {
-                        (Payload::Unit, Payload::Unit) => {}
-                        (Payload::Newtype { ty: x }, Payload::Newtype { ty: y }) => {
-                            self.ty(&at, &x.substitute(old_args), &y.substitute(new_args))
-                        }
-                        (Payload::Fields { fields: x }, Payload::Fields { fields: y }) => self.fields(&at, x, old_args, y, new_args),
-                        _ => self.fail(&at, "payload kind changed"),
-                    }
-                }
-                let added = after_indexes.iter().zip(b).find(|(index, _)| !before_indexes.contains(index));
-                if let Some((_, added)) = added
-                    && ao.is_none()
-                {
-                    self.fail(path, format!("added `{}`, but old readers have no `other` variant", added.name));
-                }
+                let (before, after) = (indexed(a), indexed(b));
+                self.enum_attrs(path, at.as_deref(), *ao, bt.as_deref(), *bo);
+                self.variants(path, &before, old_args, &after, new_args);
+                self.added_variant(path, *ao, &before, &after);
             }
             _ => self.fail(path, "changed between struct, enum and newtype"),
+        }
+    }
+
+    fn enum_attrs(&mut self, path: &str, old_tag: Option<&str>, old_other: Option<usize>, new_tag: Option<&str>, new_other: Option<usize>) {
+        if old_tag != new_tag {
+            self.fail(path, format!("JSON tag changed from {old_tag:?} to {new_tag:?}"));
+        }
+        if old_other != new_other && old_other.is_some() {
+            self.fail(path, "moved or dropped its `other` variant");
+        }
+    }
+
+    fn added_variant(&mut self, path: &str, old_other: Option<usize>, old: &[(u32, &Variant)], new: &[(u32, &Variant)]) {
+        let added = new.iter().find(|(index, _)| old.iter().all(|(known, _)| known != index));
+        if let Some((_, added)) = added
+            && old_other.is_none()
+        {
+            self.fail(path, format!("added `{}`, but old readers have no `other` variant", added.name));
+        }
+    }
+
+    fn variants(&mut self, path: &str, old: &[(u32, &Variant)], old_args: &[Ty], new: &[(u32, &Variant)], new_args: &[Ty]) {
+        for (index, before) in old {
+            let at = format!("{path}::{}", before.name);
+            let Some((_, after)) = new.iter().find(|(after, _)| after == index) else {
+                self.fail(&at, "removed");
+                continue;
+            };
+            if after.name != before.name {
+                self.fail(&at, format!("renamed or reordered to `{}`", after.name));
+            }
+            match (&before.payload, &after.payload) {
+                (Payload::Unit, Payload::Unit) => {}
+                (Payload::Newtype { ty: x }, Payload::Newtype { ty: y }) => self.ty(&at, &x.substitute(old_args), &y.substitute(new_args)),
+                (Payload::Fields { fields: x }, Payload::Fields { fields: y }) => self.fields(&at, x, old_args, y, new_args),
+                _ => self.fail(&at, "payload kind changed"),
+            }
         }
     }
 
@@ -157,6 +172,10 @@ impl<'s> Compat<'s> {
             }
         }
     }
+}
+
+fn indexed(variants: &[Variant]) -> Vec<(u32, &Variant)> {
+    variant_indexes(variants.iter().map(|variant| variant.index)).zip(variants).collect()
 }
 
 fn label(field: &Field, index: usize) -> String {

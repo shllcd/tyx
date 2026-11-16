@@ -149,6 +149,7 @@ impl<'s> Cursor<'_, 's> {
             Ty::I64 => (self.int(value, i64::MIN.into(), i64::MAX.into())? as i64).encode(w),
             Ty::F32 => {
                 let x = self.float(value)?;
+
                 if x.is_finite() && (x as f32).is_infinite() {
                     return Err(self.fail(format_args!("{x:e} does not fit in an f32")));
                 }
@@ -237,53 +238,66 @@ impl<'s> Cursor<'_, 's> {
         match &def.shape {
             Shape::Newtype { ty } => self.write(w, ty, args, value),
             Shape::Struct { fields } => self.write_fields(w, fields, args, value),
-            Shape::Enum { variants, other, .. } => {
-                let (variant_name, payload) = match value {
-                    Value::String(variant) => (variant.as_str(), None),
-                    Value::Object(entries) if entries.len() == 1 => {
-                        entries.iter().next().map(|(k, v)| (k.as_str(), Some(v))).unwrap_or_default()
-                    }
-                    _ => return Err(self.fail(format_args!("expected a `{name}` variant name or {{\"Variant\": payload}}"))),
-                };
-                let indexed: Vec<_> = variant_indexes(variants.iter().map(|variant| variant.index)).zip(variants).collect();
-                let (index, variant) = *indexed
-                    .iter()
-                    .find(|(_, variant)| variant.name == variant_name)
-                    .ok_or_else(|| self.fail(format_args!("`{variant_name}` is not a variant of `{name}`")))?;
-                let other_variant = other.and_then(|other| variants.get(other));
-                let held_index_max = other_variant.filter(|other| other.name == variant_name).and_then(Variant::max_held_index);
-                self.scoped(format!(".{variant_name}"), |cursor| match (&variant.payload, payload) {
-                    (Payload::Newtype { .. }, Some(payload)) if let Some(max) = held_index_max => {
-                        let held_index = cursor.int(payload, 0, max.into())? as u32;
-                        if indexed
-                            .iter()
-                            .any(|&(index, known)| index == held_index && other_variant.is_none_or(|other| other.name != known.name))
-                        {
-                            return Err(cursor.fail(format_args!("index {held_index} belongs to a known variant")));
-                        }
-                        w.tag(held_index, false);
-                        Ok(())
-                    }
-                    (Payload::Unit, None | Some(Value::Null)) => {
-                        w.tag(index, false);
-                        Ok(())
-                    }
-                    (Payload::Newtype { ty }, Some(payload)) => {
-                        w.tag(index, true);
-                        let frame = w.begin(0);
-                        cursor.write(w, ty, args, payload)?;
-                        w.end(frame);
-                        Ok(())
-                    }
-                    (Payload::Fields { fields }, Some(payload)) => {
-                        w.tag(index, true);
-                        cursor.write_fields(w, fields, args, payload)
-                    }
-                    (Payload::Unit, Some(_)) => Err(cursor.fail("unit variant takes no payload")),
-                    (_, None) => Err(cursor.fail("variant needs a payload")),
-                })
-            }
+            Shape::Enum { variants, other, .. } => self.write_enum(w, name, variants, *other, args, value),
         }
+    }
+
+    fn write_enum(
+        &mut self,
+        w: &mut Writer,
+        name: &str,
+        variants: &[Variant],
+        other: Option<usize>,
+        args: &[Ty],
+        value: &Value,
+    ) -> Result<(), Error> {
+        let (variant_name, payload) = match value {
+            Value::String(variant) => (variant.as_str(), None),
+            Value::Object(entries) if entries.len() == 1 => entries.iter().next().map(|(k, v)| (k.as_str(), Some(v))).unwrap_or_default(),
+            _ => return Err(self.fail(format_args!("expected a `{name}` variant name or {{\"Variant\": payload}}"))),
+        };
+
+        let indexed: Vec<_> = variant_indexes(variants.iter().map(|variant| variant.index)).zip(variants).collect();
+        let named = indexed.iter().find(|(_, variant)| variant.name == variant_name);
+        let (index, variant) = *named.ok_or_else(|| self.fail(format_args!("`{variant_name}` is not a variant of `{name}`")))?;
+
+        let other_variant = other.and_then(|other| variants.get(other));
+        let held_index_max = other_variant.filter(|other| other.name == variant_name).and_then(Variant::max_held_index);
+
+        self.scoped(format!(".{variant_name}"), |cursor| match (&variant.payload, payload) {
+            (Payload::Newtype { .. }, Some(payload)) if let Some(max) = held_index_max => {
+                let held_index = cursor.held_index(payload, max, &indexed, other_variant)?;
+                w.tag(held_index, false);
+                Ok(())
+            }
+            (Payload::Unit, None | Some(Value::Null)) => {
+                w.tag(index, false);
+                Ok(())
+            }
+            (Payload::Newtype { ty }, Some(payload)) => {
+                w.tag(index, true);
+                let frame = w.begin(0);
+                cursor.write(w, ty, args, payload)?;
+                w.end(frame);
+                Ok(())
+            }
+            (Payload::Fields { fields }, Some(payload)) => {
+                w.tag(index, true);
+                cursor.write_fields(w, fields, args, payload)
+            }
+            (Payload::Unit, Some(_)) => Err(cursor.fail("unit variant takes no payload")),
+            (_, None) => Err(cursor.fail("variant needs a payload")),
+        })
+    }
+
+    fn held_index(&self, payload: &Value, max: u32, indexed: &[(u32, &Variant)], other_variant: Option<&Variant>) -> Result<u32, Error> {
+        let held_index = self.int(payload, 0, max.into())? as u32;
+        let is_known =
+            |&(index, known): &(u32, &Variant)| index == held_index && other_variant.is_none_or(|other| other.name != known.name);
+        if indexed.iter().any(is_known) {
+            return Err(self.fail(format_args!("index {held_index} belongs to a known variant")));
+        }
+        Ok(held_index)
     }
 
     fn write_fields(&mut self, w: &mut Writer, fields: &Fields, env: &[Ty], value: &Value) -> Result<(), Error> {
@@ -324,6 +338,7 @@ impl<'s> Cursor<'_, 's> {
         Ok(match ty {
             Ty::Unit => Value::Null,
             Ty::Bool => Value::Bool(self.wire(bool::decode(r))?),
+
             Ty::U8 => Value::from(self.wire(u8::decode(r))?),
             Ty::I8 => Value::from(self.wire(i8::decode(r))?),
             Ty::U16 => Value::from(self.wire(u16::decode(r))?),
@@ -332,8 +347,10 @@ impl<'s> Cursor<'_, 's> {
             Ty::I16 => Value::from(self.wire(i16::decode(r))?),
             Ty::I32 => Value::from(self.wire(i32::decode(r))?),
             Ty::I64 => Value::from(self.wire(i64::decode(r))?),
+
             Ty::F32 => float_value(self.wire(f32::decode(r))?.into()),
             Ty::F64 => float_value(self.wire(f64::decode(r))?),
+
             Ty::Str => Value::String(self.wire(String::decode(r))?),
             Ty::Bytes => Value::String(hex(self.wire(r.len_prefixed())?)),
             Ty::Json => self.wire(read_json(r, Json::MAX_DEPTH))?,
@@ -342,6 +359,7 @@ impl<'s> Cursor<'_, 's> {
                 let at = self.wire(OffsetDateTime::decode(r))?;
                 Value::String(at.format(&Rfc3339).map_err(|error| self.fail(error))?)
             }
+
             Ty::Option { of } => match self.wire(bool::decode(r))? {
                 false => Value::Null,
                 true => self.read(r, of, env)?,
@@ -358,26 +376,8 @@ impl<'s> Cursor<'_, 's> {
                 }
                 Value::Array(items)
             }
-            Ty::Map { key, value } => {
-                let count = self.wire(r.count())?;
-                if key.substitute(env) == Ty::Str {
-                    let mut entries = Map::new();
-                    for _ in 0..count {
-                        let Value::String(name) = self.read(r, key, env)? else { unreachable!("str decodes to a string") };
-                        let item = self.scoped(format!(".{name}"), |cursor| cursor.read(r, value, env))?;
-                        entries.insert(name, item);
-                    }
-                    Value::Object(entries)
-                } else {
-                    let mut pairs = Vec::with_capacity(count);
-                    for index in 0..count {
-                        pairs.push(self.scoped(format!("[{index}]"), |cursor| {
-                            Ok(Value::Array(vec![cursor.read(r, key, env)?, cursor.read(r, value, env)?]))
-                        })?);
-                    }
-                    Value::Array(pairs)
-                }
-            }
+            Ty::Map { key, value } if key.substitute(env) == Ty::Str => self.read_object(r, key, value, env)?,
+            Ty::Map { key, value } => self.read_pairs(r, key, value, env)?,
             Ty::Named { name, args } => {
                 let args: Vec<Ty> = args.iter().map(|ty| ty.substitute(env)).collect();
                 self.read_named(r, name, &args)?
@@ -397,42 +397,74 @@ impl<'s> Cursor<'_, 's> {
         Ok(items)
     }
 
+    fn read_object(&mut self, r: &mut Reader<'_>, key: &Ty, value: &Ty, env: &[Ty]) -> Result<Value, Error> {
+        let count = self.wire(r.count())?;
+        let mut entries = Map::new();
+        for _ in 0..count {
+            let Value::String(name) = self.read(r, key, env)? else { unreachable!("str decodes to a string") };
+            let item = self.scoped(format!(".{name}"), |cursor| cursor.read(r, value, env))?;
+            entries.insert(name, item);
+        }
+        Ok(Value::Object(entries))
+    }
+
+    fn read_pairs(&mut self, r: &mut Reader<'_>, key: &Ty, value: &Ty, env: &[Ty]) -> Result<Value, Error> {
+        let count = self.wire(r.count())?;
+        let mut pairs = Vec::with_capacity(count);
+        for index in 0..count {
+            let pair = self.scoped(format!("[{index}]"), |cursor| Ok(vec![cursor.read(r, key, env)?, cursor.read(r, value, env)?]))?;
+            pairs.push(Value::Array(pair));
+        }
+        Ok(Value::Array(pairs))
+    }
+
     fn read_named(&mut self, r: &mut Reader<'_>, name: &str, args: &[Ty]) -> Result<Value, Error> {
         let def = self.def(name)?;
         match &def.shape {
             Shape::Newtype { ty } => self.read(r, ty, args),
             Shape::Struct { fields } => self.read_fields(r, fields, args),
-            Shape::Enum { variants, other, .. } => {
-                let (index, has_payload) = self.wire(r.tag())?;
-                let holds_index = |position: usize| Some(position) == *other && variants[position].max_held_index().is_some();
-                let position = variant_indexes(variants.iter().map(|variant| variant.index))
-                    .enumerate()
-                    .position(|(position, known)| known == index && !holds_index(position));
-                let Some(variant) = position.map(|position| &variants[position]) else {
-                    if has_payload {
-                        self.wire(r.skip_frame())?;
-                    }
-                    return match other.and_then(|other| variants.get(other)) {
-                        Some(fallback) if fallback.payload == Payload::Unit => Ok(Value::String(fallback.name.clone())),
-                        Some(fallback) => Ok(Value::Object(Map::from_iter([(fallback.name.clone(), Value::from(index))]))),
-                        None => Err(self.fail(format_args!("`{name}` has no variant {index}"))),
-                    };
-                };
-                self.scoped(format!(".{}", variant.name), |cursor| {
-                    let payload = match (&variant.payload, has_payload) {
-                        (Payload::Unit, false) => return Ok(Value::String(variant.name.clone())),
-                        (Payload::Newtype { ty }, true) => {
-                            let (mut body, _) = cursor.wire(r.frame())?;
-                            cursor.read(&mut body, ty, args)?
-                        }
-                        (Payload::Fields { fields }, true) => cursor.read_fields(r, fields, args)?,
-                        (Payload::Unit, true) => return Err(cursor.fail("unexpected payload on a unit variant")),
-                        (_, false) => return Err(cursor.fail("missing payload")),
-                    };
-                    Ok(Value::Object(Map::from_iter([(variant.name.clone(), payload)])))
-                })
-            }
+            Shape::Enum { variants, other, .. } => self.read_enum(r, name, variants, *other, args),
         }
+    }
+
+    fn read_enum(
+        &mut self,
+        r: &mut Reader<'_>,
+        name: &str,
+        variants: &[Variant],
+        other: Option<usize>,
+        args: &[Ty],
+    ) -> Result<Value, Error> {
+        let (index, has_payload) = self.wire(r.tag())?;
+        let holds_index = |position: usize| Some(position) == other && variants[position].max_held_index().is_some();
+        let position = variant_indexes(variants.iter().map(|variant| variant.index))
+            .enumerate()
+            .position(|(position, known)| known == index && !holds_index(position));
+
+        let Some(variant) = position.map(|position| &variants[position]) else {
+            if has_payload {
+                self.wire(r.skip_frame())?;
+            }
+            return match other.and_then(|other| variants.get(other)) {
+                Some(fallback) if fallback.payload == Payload::Unit => Ok(Value::String(fallback.name.clone())),
+                Some(fallback) => Ok(Value::Object(Map::from_iter([(fallback.name.clone(), Value::from(index))]))),
+                None => Err(self.fail(format_args!("`{name}` has no variant {index}"))),
+            };
+        };
+
+        self.scoped(format!(".{}", variant.name), |cursor| {
+            let payload = match (&variant.payload, has_payload) {
+                (Payload::Unit, false) => return Ok(Value::String(variant.name.clone())),
+                (Payload::Newtype { ty }, true) => {
+                    let (mut body, _) = cursor.wire(r.frame())?;
+                    cursor.read(&mut body, ty, args)?
+                }
+                (Payload::Fields { fields }, true) => cursor.read_fields(r, fields, args)?,
+                (Payload::Unit, true) => return Err(cursor.fail("unexpected payload on a unit variant")),
+                (_, false) => return Err(cursor.fail("missing payload")),
+            };
+            Ok(Value::Object(Map::from_iter([(variant.name.clone(), payload)])))
+        })
     }
 
     fn read_fields(&mut self, r: &mut Reader<'_>, fields: &Fields, env: &[Ty]) -> Result<Value, Error> {
@@ -447,11 +479,7 @@ impl<'s> Cursor<'_, 's> {
                 _ => Some(self.scoped(segment, |cursor| cursor.read(&mut body, &field.ty, env))?),
             };
             match fields {
-                Fields::Named(_) => {
-                    if let Some(value) = value {
-                        named.insert(field.name.clone(), value);
-                    }
-                }
+                Fields::Named(_) => named.extend(value.map(|value| (field.name.clone(), value))),
                 Fields::Tuple(_) => items.push(value.unwrap_or(Value::Null)),
             }
         }

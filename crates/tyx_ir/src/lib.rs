@@ -222,21 +222,27 @@ impl fmt::Display for Ty {
         match self {
             Self::Unit => f.write_str("()"),
             Self::Bool => f.write_str("bool"),
+
             Self::U8 => f.write_str("u8"),
             Self::U16 => f.write_str("u16"),
             Self::U32 => f.write_str("u32"),
             Self::U64 => f.write_str("u64"),
+
             Self::I8 => f.write_str("i8"),
             Self::I16 => f.write_str("i16"),
             Self::I32 => f.write_str("i32"),
             Self::I64 => f.write_str("i64"),
+
             Self::F32 => f.write_str("f32"),
             Self::F64 => f.write_str("f64"),
+
             Self::Str => f.write_str("str"),
             Self::Bytes => f.write_str("Vec<u8>"),
+
             Self::Uuid => f.write_str("Uuid"),
             Self::Timestamp => f.write_str("OffsetDateTime"),
             Self::Json => f.write_str("Json"),
+
             Self::Option { of } => write!(f, "Option<{of}>"),
             Self::Seq { of } => write!(f, "Vec<{of}>"),
             Self::Set { of } => write!(f, "Set<{of}>"),
@@ -244,31 +250,28 @@ impl fmt::Display for Ty {
             Self::Array { of, len } => write!(f, "[{of}; {len}]"),
             Self::Tuple { of } => {
                 f.write_str("(")?;
-                for (index, ty) in of.iter().enumerate() {
-                    if index > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{ty}")?;
-                }
+                comma_separated(f, of)?;
                 f.write_str(if of.len() == 1 { ",)" } else { ")" })
             }
+            Self::Named { name, args } if args.is_empty() => f.write_str(name),
             Self::Named { name, args } => {
-                f.write_str(name)?;
-                if !args.is_empty() {
-                    f.write_str("<")?;
-                    for (index, ty) in args.iter().enumerate() {
-                        if index > 0 {
-                            f.write_str(", ")?;
-                        }
-                        write!(f, "{ty}")?;
-                    }
-                    f.write_str(">")?;
-                }
-                Ok(())
+                write!(f, "{name}<")?;
+                comma_separated(f, args)?;
+                f.write_str(">")
             }
             Self::Param { index } => write!(f, "${index}"),
         }
     }
+}
+
+fn comma_separated(f: &mut fmt::Formatter<'_>, items: &[Ty]) -> fmt::Result {
+    for (index, ty) in items.iter().enumerate() {
+        if index > 0 {
+            f.write_str(", ")?;
+        }
+        write!(f, "{ty}")?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,22 +377,28 @@ impl TyParser<'_> {
             1 => Ok(Box::new(args.remove(0))),
             _ => Err(parser.error(&format!("`{name}` takes one type argument"))),
         };
+
         Ok(match name.as_str() {
             "bool" => Ty::Bool,
+
             "u8" => Ty::U8,
             "u16" => Ty::U16,
             "u32" => Ty::U32,
             "u64" | "usize" => Ty::U64,
+
             "i8" => Ty::I8,
             "i16" => Ty::I16,
             "i32" => Ty::I32,
             "i64" | "isize" => Ty::I64,
+
             "f32" => Ty::F32,
             "f64" => Ty::F64,
+
             "str" | "String" => Ty::Str,
             "Uuid" => Ty::Uuid,
             "OffsetDateTime" => Ty::Timestamp,
             "Json" => Ty::Json,
+
             "Box" | "Arc" | "Rc" => *one(&mut args, self)?,
             "Option" => Ty::Option { of: one(&mut args, self)? },
             "Vec" => Ty::seq(*one(&mut args, self)?),
@@ -442,15 +451,12 @@ impl Schema {
     pub fn merge(schemas: impl IntoIterator<Item = Self>) -> Result<Self, Error> {
         let mut types = BTreeMap::<String, Def>::new();
         for def in schemas.into_iter().flat_map(|schema| schema.types) {
-            match types.get(&def.name) {
-                Some(known) if *known != def => {
-                    return Err(Error::Conflict { name: def.name, first: known.module.clone(), second: def.module });
-                }
-                Some(_) => {}
-                None => {
-                    types.insert(def.name.clone(), def);
-                }
+            if let Some(known) = types.get(&def.name)
+                && *known != def
+            {
+                return Err(Error::Conflict { name: def.name, first: known.module.clone(), second: def.module });
             }
+            types.entry(def.name.clone()).or_insert(def);
         }
         let schema = Self { types: types.into_values().collect() };
         schema.validate()?;
@@ -468,26 +474,7 @@ impl Schema {
             match &def.shape {
                 Shape::Newtype { ty } => check(ty)?,
                 Shape::Struct { fields } => check_fields(def, fields, &mut check)?,
-                Shape::Enum { variants, other, .. } => {
-                    let mut indexes: Vec<u32> = variant_indexes(variants.iter().map(|variant| variant.index)).collect();
-                    indexes.sort_unstable();
-                    if let Some(pair) = indexes.windows(2).find(|pair| pair[0] == pair[1]) {
-                        return Err(Error::DuplicateVariantIndex { ty: def.name.clone(), index: pair[0] });
-                    }
-                    if let Some(other) = other.and_then(|other| variants.get(other))
-                        && other.payload != Payload::Unit
-                        && other.max_held_index().is_none()
-                    {
-                        return Err(Error::InvalidOther { ty: def.name.clone() });
-                    }
-                    for variant in variants {
-                        match &variant.payload {
-                            Payload::Unit => {}
-                            Payload::Newtype { ty } => check(ty)?,
-                            Payload::Fields { fields } => check_fields(def, fields, &mut check)?,
-                        }
-                    }
-                }
+                Shape::Enum { variants, other, .. } => check_variants(def, variants, *other, &mut check)?,
             }
         }
         Ok(())
@@ -519,6 +506,35 @@ impl Schema {
     pub fn from_json(json: &str) -> serde_json::Result<Self> {
         serde_json::from_str(json)
     }
+}
+
+fn check_variants(
+    def: &Def,
+    variants: &[Variant],
+    other: Option<usize>,
+    check: &mut impl FnMut(&Ty) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let mut indexes: Vec<u32> = variant_indexes(variants.iter().map(|variant| variant.index)).collect();
+    indexes.sort_unstable();
+    if let Some(pair) = indexes.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(Error::DuplicateVariantIndex { ty: def.name.clone(), index: pair[0] });
+    }
+
+    if let Some(other) = other.and_then(|other| variants.get(other))
+        && other.payload != Payload::Unit
+        && other.max_held_index().is_none()
+    {
+        return Err(Error::InvalidOther { ty: def.name.clone() });
+    }
+
+    for variant in variants {
+        match &variant.payload {
+            Payload::Unit => {}
+            Payload::Newtype { ty } => check(ty)?,
+            Payload::Fields { fields } => check_fields(def, fields, check)?,
+        }
+    }
+    Ok(())
 }
 
 fn check_fields(def: &Def, fields: &Fields, check: &mut impl FnMut(&Ty) -> Result<(), Error>) -> Result<(), Error> {
