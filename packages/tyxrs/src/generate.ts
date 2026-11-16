@@ -99,6 +99,8 @@ function ty(node: Ty, env: readonly string[]): string {
     case "uuid":
     case "timestamp":
       return "string";
+    case "json":
+      return "unknown";
     case "option":
       return `${ty(node.of, env)} | null`;
     case "seq":

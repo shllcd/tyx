@@ -1,6 +1,7 @@
 const MAX_VARINT_BYTES = 10;
 const ASCII_ENCODE_FAST_PATH_MAX = 64;
 const ASCII_DECODE_FAST_PATH_MAX = 16;
+const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -26,6 +27,10 @@ function varintSize(value: number): number {
     size++;
   }
   return size;
+}
+
+function safeNumber(value: bigint): number | bigint {
+  return value >= -MAX_SAFE_INTEGER && value <= MAX_SAFE_INTEGER ? Number(value) : value;
 }
 
 export class Writer {
@@ -277,6 +282,18 @@ export class Reader {
   zigzag(): bigint {
     const raw = this.varint();
     return (raw >> 1n) ^ -(raw & 1n);
+  }
+
+  zigzagSafe(): number | bigint {
+    const start = this.pos;
+    const raw = this.varintNumber();
+    if (raw <= Number.MAX_SAFE_INTEGER) return raw % 2 === 1 ? -(raw + 1) / 2 : raw / 2;
+    this.pos = start;
+    return safeNumber(this.zigzag());
+  }
+
+  varintSafe(): number | bigint {
+    return safeNumber(this.varint());
   }
 
   /** Reads a zigzag varint as a `number`, exact for magnitudes below 2^52. */

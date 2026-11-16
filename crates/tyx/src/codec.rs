@@ -268,6 +268,109 @@ impl Decode<'_> for String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Uint(u64),
+    Float(f64),
+    Str(String),
+    Array(Vec<Self>),
+    Object(Vec<(String, Self)>),
+}
+
+pub(crate) mod json_tag {
+    pub const NULL: u8 = 0;
+    pub const FALSE: u8 = 1;
+    pub const TRUE: u8 = 2;
+    pub const INT: u8 = 3;
+    pub const UINT: u8 = 4;
+    pub const FLOAT: u8 = 5;
+    pub const STR: u8 = 6;
+    pub const ARRAY: u8 = 7;
+    pub const OBJECT: u8 = 8;
+}
+
+impl Json {
+    pub const MAX_DEPTH: usize = 128;
+
+    fn decode_nested(r: &mut Reader<'_>, depth_left: usize) -> Result<Self, Error> {
+        Ok(match r.byte()? {
+            json_tag::NULL => Self::Null,
+            json_tag::FALSE => Self::Bool(false),
+            json_tag::TRUE => Self::Bool(true),
+            json_tag::INT => Self::Int(i64::decode(r)?),
+            json_tag::UINT => Self::Uint(u64::decode(r)?),
+            json_tag::FLOAT => Self::Float(f64::decode(r)?),
+            json_tag::STR => Self::Str(String::decode(r)?),
+            json_tag::ARRAY => {
+                let depth_left = depth_left.checked_sub(1).ok_or(Error::JsonTooDeep)?;
+                let count = r.count()?;
+                let mut items = Vec::with_capacity(prealloc::<Self>(count, r));
+                for _ in 0..count {
+                    items.push(Self::decode_nested(r, depth_left)?);
+                }
+                Self::Array(items)
+            }
+            json_tag::OBJECT => {
+                let depth_left = depth_left.checked_sub(1).ok_or(Error::JsonTooDeep)?;
+                let count = r.count()?;
+                let mut members = Vec::with_capacity(prealloc::<(String, Self)>(count, r));
+                for _ in 0..count {
+                    members.push((String::decode(r)?, Self::decode_nested(r, depth_left)?));
+                }
+                Self::Object(members)
+            }
+            tag => return Err(Error::InvalidJsonTag(tag)),
+        })
+    }
+}
+
+impl Encode for Json {
+    fn encode(&self, w: &mut Writer) {
+        match self {
+            Self::Float(float) if float.is_finite() => {
+                w.byte(json_tag::FLOAT);
+                float.encode(w);
+            }
+            Self::Null | Self::Float(_) => w.byte(json_tag::NULL),
+            Self::Bool(flag) => w.byte(if *flag { json_tag::TRUE } else { json_tag::FALSE }),
+            Self::Int(int) => {
+                w.byte(json_tag::INT);
+                int.encode(w);
+            }
+            Self::Uint(uint) => {
+                w.byte(json_tag::UINT);
+                uint.encode(w);
+            }
+            Self::Str(text) => {
+                w.byte(json_tag::STR);
+                text.encode(w);
+            }
+            Self::Array(items) => {
+                w.byte(json_tag::ARRAY);
+                items.encode(w);
+            }
+            Self::Object(members) => {
+                w.byte(json_tag::OBJECT);
+                w.varint(members.len() as u64);
+                for (name, value) in members {
+                    name.encode(w);
+                    value.encode(w);
+                }
+            }
+        }
+    }
+}
+
+impl Decode<'_> for Json {
+    #[inline]
+    fn decode(r: &mut Reader<'_>) -> Result<Self, Error> {
+        Self::decode_nested(r, Self::MAX_DEPTH)
+    }
+}
+
 macro_rules! shared_str {
     ($($ptr:ident),+) => {$(
         impl Decode<'_> for $ptr<str> {

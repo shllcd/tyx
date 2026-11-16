@@ -4,7 +4,7 @@ pub mod json;
 mod schema;
 mod wire;
 
-pub use codec::{Decode, Encode, SeqIter, SeqRef, Unknown, UnknownRef};
+pub use codec::{Decode, Encode, Json, SeqIter, SeqRef, Unknown, UnknownRef};
 #[cfg(feature = "export")]
 pub use schema::schema;
 pub use schema::{Param, Registry, Type};

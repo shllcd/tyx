@@ -121,6 +121,7 @@ leaf! {
     i8 => I8, i16 => I16, i32 => I32, i64 => I64, isize => I64,
     f32 => F32, f64 => F64,
     str => Str, String => Str,
+    crate::Json => Json,
 }
 
 #[cfg(feature = "uuid")]

@@ -48,6 +48,7 @@ export type Ty =
   | { kind: "bytes" }
   | { kind: "uuid" }
   | { kind: "timestamp" }
+  | { kind: "json" }
   | { kind: "option"; of: Ty }
   | { kind: "seq"; of: Ty }
   | { kind: "set"; of: Ty }

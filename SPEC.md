@@ -15,6 +15,7 @@ type tags: a reader must know the schema (the IR) to decode it.
 | `f32`/`f64` | IEEE 754, little endian, 4/8 bytes                               |
 | `str`       | varint byte length, then UTF-8 bytes                             |
 | `bytes`     | varint byte length, then the bytes (the same as `seq` of `u8`)   |
+| `json`      | a tagged value, see [JSON values](#json-values)                  |
 | `uuid`      | 16 raw bytes, RFC 9562 byte order                                |
 | `timestamp` | `i64` milliseconds since the Unix epoch, UTC                     |
 
@@ -35,6 +36,25 @@ A reader rejects a `seq`, `set` or `map` count larger than the bytes left in its
 encoded in zero bytes (e.g. `unit`) cannot be longer than the bytes that follow its count.
 
 `option` above is the standalone form. Struct fields of type `Option<T>` use the presence mask instead.
+
+## JSON values
+
+A `json` value is one tag byte followed by its payload:
+
+| Tag | Value                    | Payload                                           |
+|-----|--------------------------|---------------------------------------------------|
+| `0` | `null`                   | nothing                                           |
+| `1` | `false`                  | nothing                                           |
+| `2` | `true`                   | nothing                                           |
+| `3` | integer                  | as `i64`                                          |
+| `4` | integer above `i64::MAX` | as `u64`                                          |
+| `5` | float                    | as `f64`                                          |
+| `6` | string                   | as `str`                                          |
+| `7` | array                    | varint count, then the `json` items               |
+| `8` | object                   | varint count, then `str` name, `json` value pairs |
+
+Any other tag is an error. A writer encodes a non-finite float as `null`. A reader rejects arrays and objects
+nested deeper than 128.
 
 ## Frames
 

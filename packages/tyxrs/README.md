@@ -87,6 +87,7 @@ const user = codec.decode("User", bytes);
 | `f32`, `f64`               | `number`                                                       |
 | `str`                      | `string`                                                       |
 | `bytes`                    | lowercase hex `string`                                         |
+| `json`                     | the JSON value, typed `unknown` |
 | `uuid`                     | hyphenated `string`                                            |
 | `timestamp`                | RFC 3339 `string`, decoded in UTC                              |
 | `option`                   | `null` or the value; `undefined` encodes as none               |

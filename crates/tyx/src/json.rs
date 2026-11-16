@@ -15,7 +15,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tyx_ir::{Def, Fields, Payload, Schema, Shape, Ty, Variant, variant_indexes};
 
-use crate::{Decode, Encode, Reader, Writer};
+use crate::codec::json_tag;
+use crate::{Decode, Encode, Json, Reader, Writer};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
@@ -156,6 +157,7 @@ impl<'s> Cursor<'_, 's> {
             Ty::F64 => self.float(value)?.encode(w),
             Ty::Str => value.as_str().ok_or_else(|| self.fail("expected a string"))?.encode(w),
             Ty::Bytes => w.len_prefixed(&value.as_str().and_then(parse_hex).ok_or_else(|| self.fail("expected a hex string"))?),
+            Ty::Json => write_json(w, value),
             Ty::Uuid => w.bytes(&value.as_str().and_then(parse_uuid).ok_or_else(|| self.fail("expected a hyphenated uuid"))?),
             Ty::Timestamp => {
                 let text = value.as_str().ok_or_else(|| self.fail("expected an RFC 3339 timestamp"))?;
@@ -334,6 +336,7 @@ impl<'s> Cursor<'_, 's> {
             Ty::F64 => float_value(self.wire(f64::decode(r))?),
             Ty::Str => Value::String(self.wire(String::decode(r))?),
             Ty::Bytes => Value::String(hex(self.wire(r.len_prefixed())?)),
+            Ty::Json => self.wire(read_json(r, Json::MAX_DEPTH))?,
             Ty::Uuid => Value::String(hex_uuid(self.wire(r.array())?)),
             Ty::Timestamp => {
                 let at = self.wire(OffsetDateTime::decode(r))?;
@@ -466,4 +469,67 @@ fn float_value(x: f64) -> Value {
         None if x > 0.0 => Value::from("Infinity"),
         None => Value::from("-Infinity"),
     }
+}
+
+fn write_json(w: &mut Writer, value: &Value) {
+    match value {
+        Value::Null => w.byte(json_tag::NULL),
+        Value::Bool(flag) => w.byte(if *flag { json_tag::TRUE } else { json_tag::FALSE }),
+        Value::Number(number) => match (number.as_i64(), number.as_u64(), number.as_f64()) {
+            (Some(int), ..) => {
+                w.byte(json_tag::INT);
+                int.encode(w);
+            }
+            (None, Some(uint), _) => {
+                w.byte(json_tag::UINT);
+                uint.encode(w);
+            }
+            (None, None, Some(float)) => {
+                w.byte(json_tag::FLOAT);
+                float.encode(w);
+            }
+            (None, None, None) => w.byte(json_tag::NULL),
+        },
+        Value::String(text) => {
+            w.byte(json_tag::STR);
+            text.encode(w);
+        }
+        Value::Array(items) => {
+            w.byte(json_tag::ARRAY);
+            w.varint(items.len() as u64);
+            for item in items {
+                write_json(w, item);
+            }
+        }
+        Value::Object(members) => {
+            w.byte(json_tag::OBJECT);
+            w.varint(members.len() as u64);
+            for (name, member) in members {
+                name.encode(w);
+                write_json(w, member);
+            }
+        }
+    }
+}
+
+fn read_json(r: &mut Reader<'_>, depth_left: usize) -> Result<Value, crate::Error> {
+    Ok(match r.byte()? {
+        json_tag::NULL => Value::Null,
+        json_tag::FALSE => Value::Bool(false),
+        json_tag::TRUE => Value::Bool(true),
+        json_tag::INT => Value::from(i64::decode(r)?),
+        json_tag::UINT => Value::from(u64::decode(r)?),
+        json_tag::FLOAT => Number::from_f64(f64::decode(r)?).map_or(Value::Null, Value::Number),
+        json_tag::STR => Value::String(String::decode(r)?),
+        json_tag::ARRAY => {
+            let depth_left = depth_left.checked_sub(1).ok_or(crate::Error::JsonTooDeep)?;
+            (0..r.count()?).map(|_| read_json(r, depth_left)).collect::<Result<_, _>>()?
+        }
+        json_tag::OBJECT => {
+            let depth_left = depth_left.checked_sub(1).ok_or(crate::Error::JsonTooDeep)?;
+            let members = (0..r.count()?).map(|_| Ok((String::decode(r)?, read_json(r, depth_left)?)));
+            Value::Object(members.collect::<Result<_, crate::Error>>()?)
+        }
+        tag => return Err(crate::Error::InvalidJsonTag(tag)),
+    })
 }

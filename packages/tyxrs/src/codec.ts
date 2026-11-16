@@ -6,6 +6,16 @@ const I64_MAX = 0x7fff_ffff_ffff_ffffn;
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 const MAX_NUMBER_MASK_BITS = 52;
 const MAX_REUSED_WRITER_CAPACITY = 0x1_0000;
+const JSON_MAX_DEPTH = 128;
+const JSON_NULL = 0;
+const JSON_FALSE = 1;
+const JSON_TRUE = 2;
+const JSON_INT = 3;
+const JSON_UINT = 4;
+const JSON_FLOAT = 5;
+const JSON_STR = 6;
+const JSON_ARRAY = 7;
+const JSON_OBJECT = 8;
 
 type Encode = (w: Writer, value: unknown) => void;
 type Decode = (r: Reader) => unknown;
@@ -448,6 +458,8 @@ class Compiler {
         return (w, value) => w.str(string(value));
       case "bytes":
         return (w, value) => w.lenPrefixed(parseHex(value));
+      case "json":
+        return (w, value) => writeJson(w, value, JSON_MAX_DEPTH);
       case "uuid":
         return (w, value) => w.bytes(parseUuid(value));
       case "timestamp":
@@ -719,6 +731,8 @@ class Compiler {
         return (r) => r.str();
       case "bytes":
         return (r) => formatHex(r.lenPrefixed());
+      case "json":
+        return (r) => readJson(r, JSON_MAX_DEPTH);
       case "uuid":
         return (r) => formatUuid(r.take(16));
       case "timestamp":
@@ -926,4 +940,133 @@ function readItems(r: Reader, item: Decode, count: number): unknown[] {
     }
   }
   return items;
+}
+
+function writeJson(w: Writer, value: unknown, depthLeft: number): void {
+  switch (typeof value) {
+    case "boolean":
+      w.byte(value ? JSON_TRUE : JSON_FALSE);
+      return;
+    case "number":
+      if (Number.isSafeInteger(value)) {
+        w.byte(JSON_INT);
+        w.zigzagNumber(value);
+      } else if (Number.isFinite(value)) {
+        w.byte(JSON_FLOAT);
+        w.f64(value);
+      } else {
+        w.byte(JSON_NULL);
+      }
+      return;
+    case "bigint":
+      if (value >= I64_MIN && value <= I64_MAX) {
+        w.byte(JSON_INT);
+        w.zigzag(value);
+      } else {
+        w.byte(JSON_UINT);
+        w.varint(bigint(value, 0n, U64_MAX));
+      }
+      return;
+    case "string":
+      w.byte(JSON_STR);
+      w.str(string(value));
+      return;
+    case "object":
+      break;
+    default:
+      throw new TyxError(`expected a JSON value, got ${show(value)}`);
+  }
+  if (value === null) {
+    w.byte(JSON_NULL);
+    return;
+  }
+  if (depthLeft === 0) throw new TyxError("json nested too deep");
+  if (Array.isArray(value)) {
+    w.byte(JSON_ARRAY);
+    w.uvarint(value.length);
+    for (let index = 0; index < value.length; index++) {
+      try {
+        writeJson(w, value[index] ?? null, depthLeft - 1);
+      } catch (error) {
+        throw within(error, `[${index}]`);
+      }
+    }
+    return;
+  }
+  const members = value as Record<string, unknown>;
+  if (typeof members.toJSON === "function") {
+    writeJson(w, members.toJSON(), depthLeft);
+    return;
+  }
+  const names = Object.keys(members);
+  let count = 0;
+  for (const name of names) {
+    if (members[name] !== undefined) count++;
+  }
+  w.byte(JSON_OBJECT);
+  w.uvarint(count);
+  for (const name of names) {
+    const member = members[name];
+    if (member === undefined) continue;
+    try {
+      w.str(string(name));
+      writeJson(w, member, depthLeft - 1);
+    } catch (error) {
+      throw within(error, `.${name}`);
+    }
+  }
+}
+
+function readJson(r: Reader, depthLeft: number): unknown {
+  const tag = r.byte();
+  switch (tag) {
+    case JSON_NULL:
+      return null;
+    case JSON_FALSE:
+      return false;
+    case JSON_TRUE:
+      return true;
+    case JSON_INT:
+      return r.zigzagSafe();
+    case JSON_UINT:
+      return r.varintSafe();
+    case JSON_FLOAT:
+      return r.f64();
+    case JSON_STR:
+      return r.str();
+    case JSON_ARRAY: {
+      if (depthLeft === 0) throw new TyxError("json nested too deep");
+      const count = r.length();
+      const items: unknown[] = new Array(count);
+      for (let index = 0; index < count; index++) {
+        try {
+          items[index] = readJson(r, depthLeft - 1);
+        } catch (error) {
+          throw within(error, `[${index}]`);
+        }
+      }
+      return items;
+    }
+    case JSON_OBJECT: {
+      if (depthLeft === 0) throw new TyxError("json nested too deep");
+      const count = r.length();
+      const members: Record<string, unknown> = {};
+      for (let index = 0; index < count; index++) {
+        const name = r.str();
+        try {
+          const member = readJson(r, depthLeft - 1);
+          if (name === "__proto__") {
+            Object.defineProperty(members, name, { value: member, writable: true, enumerable: true, configurable: true });
+          } else {
+            members[name] = member;
+          }
+        } catch (error) {
+          throw within(error, `.${name}`);
+        }
+      }
+      return members;
+    }
+    default:
+      throw new TyxError(`invalid json tag 0x${tag.toString(16).padStart(2, "0")}`);
+  }
 }

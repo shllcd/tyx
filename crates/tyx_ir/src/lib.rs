@@ -138,6 +138,7 @@ pub enum Ty {
     Bytes,
     Uuid,
     Timestamp,
+    Json,
     Option {
         of: Box<Ty>,
     },
@@ -188,7 +189,13 @@ impl Ty {
             Self::Seq { .. } | Self::Set { .. } => Some(Value::Array(Vec::new())),
             Self::Map { key, .. } if **key == Self::Str => Some(Value::Object(serde_json::Map::new())),
             Self::Map { .. } => Some(Value::Array(Vec::new())),
-            Self::Uuid | Self::Timestamp | Self::Array { .. } | Self::Tuple { .. } | Self::Named { .. } | Self::Param { .. } => None,
+            Self::Uuid
+            | Self::Timestamp
+            | Self::Json
+            | Self::Array { .. }
+            | Self::Tuple { .. }
+            | Self::Named { .. }
+            | Self::Param { .. } => None,
         }
     }
 
@@ -229,6 +236,7 @@ impl fmt::Display for Ty {
             Self::Bytes => f.write_str("Vec<u8>"),
             Self::Uuid => f.write_str("Uuid"),
             Self::Timestamp => f.write_str("OffsetDateTime"),
+            Self::Json => f.write_str("Json"),
             Self::Option { of } => write!(f, "Option<{of}>"),
             Self::Seq { of } => write!(f, "Vec<{of}>"),
             Self::Set { of } => write!(f, "Set<{of}>"),
@@ -381,6 +389,7 @@ impl TyParser<'_> {
             "str" | "String" => Ty::Str,
             "Uuid" => Ty::Uuid,
             "OffsetDateTime" => Ty::Timestamp,
+            "Json" => Ty::Json,
             "Box" | "Arc" | "Rc" => *one(&mut args, self)?,
             "Option" => Ty::Option { of: one(&mut args, self)? },
             "Vec" => Ty::seq(*one(&mut args, self)?),
