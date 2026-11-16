@@ -9,6 +9,8 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-16
+
 ### Breaking
 
 - `Error` gains the `InvalidJsonTag` and `JsonTooDeep` variants, so an exhaustive `match` on it no longer compiles.
