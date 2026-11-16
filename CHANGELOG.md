@@ -16,7 +16,6 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 ### Added
 
 - `Json`, a type for JSON values: tagged binary on the wire, the value itself in the JSON form and in `tyxrs`.
-  Readers reject values nested deeper than 128, and `tyxrs` decodes integers past 2^53 as `bigint`.
 - `Reader.zigzagSafe` and `Reader.varintSafe` in `tyxrs`, reading a varint as a `number` when it is a safe integer and as a `bigint` otherwise.
 
 ## [0.1.0] - 2026-11-05
